@@ -2,7 +2,6 @@ import sys
 import os
 import numpy as np
 import threading
-from qt_material import apply_stylesheet
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton, QSpinBox,
     QLabel, QFileDialog, QHBoxLayout, QDoubleSpinBox, QLineEdit,
@@ -14,12 +13,13 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import vdiflib
 from datetime import datetime, timezone
+from qt_material import apply_stylesheet
 
 class VDIFViewer(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("VDIF Viewer - With Stats Sidebar")
-        self.resize(1380, 800)
+        self.resize(1480, 800)
         self.current_frame = 0
         self.vdif_path = None
         # data cache for background processing
@@ -118,8 +118,8 @@ class VDIFViewer(QWidget):
 
         self.tableview = QTableView()
         self.tableview.setAlternatingRowColors(True)
-        self.tableview.setFixedWidth(370)
-        self.tableview.setColumnWidth(0, 210)
+        self.tableview.setFixedWidth(400)
+        self.tableview.setColumnWidth(0, 240)
         self.tableview.setColumnWidth(1, 160)
 
         self.tableview.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
