@@ -224,7 +224,7 @@ class VDIFProcessThread(threading.Thread):
                     vtype=self.stats['DATA_TYPE'], 
                     bits=self.proc_params['bits'], 
                     count=frames)
-                if data is None:
+                if data is None or len(data) == 0:
                     break
                 output = []
                 print(f"Processing batch {idx+1}/{frames} - FFT")

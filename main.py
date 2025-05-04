@@ -13,7 +13,8 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import vdiflib
 from datetime import datetime, timezone
-from qt_material import apply_stylesheet
+#from qt_material import apply_stylesheet
+import qdarktheme
 
 class VDIFViewer(QWidget):
     def __init__(self):
@@ -286,6 +287,7 @@ if __name__ == '__main__':
     app = QApplication(sys.argv)
     viewer = VDIFViewer()
     # setup stylesheet
-    apply_stylesheet(app, theme='light_blue.xml')
+    #apply_stylesheet(app, theme='light_blue.xml')
+    qdarktheme.setup_theme()
     viewer.show()
     sys.exit(app.exec_())
