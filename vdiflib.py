@@ -3,7 +3,6 @@ import threading
 import vdifheader as vh
 import numpy as np
 import threading
-import bitstruct
 
 # Lookup tables for 1-bit and 2-bit quantization (example mappings)
 ONE_BIT_MAP = {0: -1.0, 1: 1.0}
@@ -245,6 +244,7 @@ class VDIFProcessThread(threading.Thread):
 
 if __name__ == '__main__':
     vdif_path = './data/testpeb1_01min.vdif'
+    vdif_path="../gpu_pulsar_pipeline/res/a2102gt6.vdif"
     # stats = analyze_vdif_file(vdif_path)
     # print(stats)
 
@@ -255,8 +255,9 @@ if __name__ == '__main__':
         big_data = decode_2bit_samples(b, 'big')
         little_data = decode_2bit_samples(b, 'little')
     
-    print(converted[1000:1020])
-    print(big_data[1000:1020])
-    print(little_data[1000:1020])
+    for i in range(32):
+        print(converted[i*4+0], converted[i*4+1], converted[i*4+2], converted[i*4+3], end='|')
+        if (i+1) % 4 == 0:
+            print()
 
     
