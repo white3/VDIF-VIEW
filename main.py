@@ -2,6 +2,7 @@ import sys
 import os
 import numpy as np
 import threading
+from qt_material import apply_stylesheet
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton, QSpinBox,
     QLabel, QFileDialog, QHBoxLayout, QDoubleSpinBox, QLineEdit,
@@ -18,7 +19,7 @@ class VDIFViewer(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("VDIF Viewer - With Stats Sidebar")
-        self.resize(1200, 800)
+        self.resize(1380, 800)
         self.current_frame = 0
         self.vdif_path = None
         # data cache for background processing
@@ -30,10 +31,11 @@ class VDIFViewer(QWidget):
         self.prcthread = None
         self.init_ui()
 
-    def close(self):
-        self.prcthread.stats['running'] = False
-        self.prcthread.join()
-        return super().close()
+    def closeEvent(self, event):
+        print("Closing VDIF Viewer")
+        if self.prcthread:
+            self.prcthread.stopProcess()
+        return super().closeEvent(event)
 
     def init_ui(self):
         main_layout = QHBoxLayout()
@@ -42,9 +44,9 @@ class VDIFViewer(QWidget):
         int_layout = QHBoxLayout()
 
         self.VDIF_settings_label = QLabel("VDIF Settings:")
-        self.VDIF_settings_label.setFixedWidth(75)
+        self.VDIF_settings_label.setFixedWidth(100)
         self.VDIF_settings_combo = QLineEdit()
-        self.VDIF_settings_combo.setPlaceholderText("512MHz-4ch-2bit")
+        self.VDIF_settings_combo.setPlaceholderText("512-16-2")
         self.VDIF_settings_combo.setEnabled(False)
         self.VDIF_settings_combo.setFixedWidth(125)
         self.VDIF_settings_checkbox = QCheckBox()
@@ -63,7 +65,7 @@ class VDIFViewer(QWidget):
         file_label_layout.addWidget(self.file_label)
 
         self.FFT_size_label = QLabel("FFT Size:")
-        self.FFT_size_label.setFixedWidth(75)
+        self.FFT_size_label.setFixedWidth(100)
         self.FFT_size_spin = QSpinBox()
         self.FFT_size_spin.setMinimum(32)
         self.FFT_size_spin.setMaximum(4096)
@@ -89,7 +91,7 @@ class VDIFViewer(QWidget):
         self.canvas = FigureCanvas(self.figure)
         
         self.figure.clear()
-        self.plot_current_frame("Please select a VDIF file first.")
+        self.set_frame("Please select a VDIF file first.")
 
         nav_layout = QHBoxLayout()
         self.prev_button = QPushButton("< Prev Frame")
@@ -116,9 +118,9 @@ class VDIFViewer(QWidget):
 
         self.tableview = QTableView()
         self.tableview.setAlternatingRowColors(True)
-        self.tableview.setFixedWidth(450)
-        self.tableview.setColumnWidth(0, 250)
-        self.tableview.setColumnWidth(1, 200)
+        self.tableview.setFixedWidth(370)
+        self.tableview.setColumnWidth(0, 210)
+        self.tableview.setColumnWidth(1, 160)
 
         self.tableview.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
@@ -139,6 +141,16 @@ class VDIFViewer(QWidget):
             self.stats = vdiflib.analyze_vdif_file(path)
             self.display_stats(self.stats)
             self.ready2plot = True
+            if self.stats.get('CHANNELS_BAND_MHz'):
+                self.VDIF_settings_combo.setText(
+                    "{:d}-{:d}-{:d}".format(
+                        int(self.stats['CHANNELS_BAND_MHz']*self.stats['NUM_CHANNELS']), 
+                        int(self.stats['NUM_CHANNELS']), 
+                        int(self.stats['BITS_PER_SAMPLE']), 
+                    ))
+            else:
+                self.alert(title="Error", text="Please input the VDIF settings manually: \n512-16-2\n<band width in MHz>-<num channels>-<bits per sample>")
+                self.VDIF_settings_checkbox.setChecked(True)
 
     def display_stats(self, stats):
         i = 0
@@ -146,36 +158,40 @@ class VDIFViewer(QWidget):
             self.model.setItem(i, 0, QStandardItem(str(field_name)))
             self.model.setItem(i, 1, QStandardItem(str(field_value)))
             i += 1
+    
+    def alert(self, title="Error", text="The VDIF data duration should exceed 1 second!"):
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle(title)
+        dlg.setText(text)
+        dlg.setStandardButtons(QMessageBox.Ok)
+        dlg.setIcon(QMessageBox.Critical)
+        dlg.exec()
 
     def start_background_processing(self):
         self.start_button.setEnabled(True)
 
-        if self.stats.get('CHANNELS_BAND_MHz') is None:
-            dlg = QMessageBox(self)
-            dlg.setWindowTitle("Error")
-            dlg.setText("The VDIF data duration should exceed 1 second!")
-            dlg.setStandardButtons(QMessageBox.Ok)
-            dlg.setIcon(QMessageBox.Critical)
-            dlg.exec()
-            return
+        # if self.stats.get('CHANNELS_BAND_MHz') is None:
+        #     self.alert()
+        #     return
         if self.prcthread:
             self.prcthread.stats["running"] = False
         self.tmp_data = []
         self.plotnum = vdiflib.AtomicInt(-1)
         self.prcthread = vdiflib.VDIFProcessThread(
-            self.integration_spin.value(),
-            self.FFT_size_spin.value(),
-            self.stats,
-            self.vdif_path,
-            self.tmp_data,
-            self
+            vdifstr=self.VDIF_settings_combo.text(),
+            integration=self.integration_spin.value(),
+            fftsize=self.FFT_size_spin.value(),
+            stats=self.stats,
+            vdif_path=self.vdif_path,
+            tmp_data=self.tmp_data,
+            parent=self
         )
         if self.ready2plot:
             self.prcthread.setDaemon(False)
             self.prcthread.start()
             self.ready2plot = False
 
-    def plot_current_frame(self):
+    def plot_current_frame(self, text=None):
         if self.current_frame >= self.plotnum.get():
             self.current_frame = self.plotnum.get()
             self.frame_spin.setValue(self.current_frame)
@@ -184,9 +200,9 @@ class VDIFViewer(QWidget):
             self.frame_spin.setValue(self.current_frame)
 
         try:
-            data = np.load(self.tmp_data[self.current_frame])
-            spectrum = np.fft.fftshift(np.fft.fft(data))
-            freq = np.fft.fftshift(np.fft.fftfreq(len(data)))
+            data = self.tmp_data[self.current_frame]
+            freq = np.array(data[0][1:], dtype=float)
+            spectrum = np.array(data[1][1:], dtype=complex)
 
             self.amp_line.set_data(freq, np.abs(spectrum))
             self.phase_line.set_data(freq, np.angle(spectrum))
@@ -199,15 +215,18 @@ class VDIFViewer(QWidget):
         except Exception as e:
             self.ax1.clear()
             self.ax2.clear()
-            self.ax1.text(0.5, 0.5, f"Error: {e}", ha='center', transform=self.ax1.transAxes)
+            if text:
+                self.ax1.text(0.5, 0.5, text, ha='center', transform=self.ax1.transAxes)
+            else:
+                self.ax1.text(0.5, 0.5, f"Error: {e}", ha='center', transform=self.ax1.transAxes)
             self.canvas.draw()
 
     def set_frame(self, text=None):
         # if not self.tmp_data:
         #     return
         self.figure.clear()
-        ax1 = self.figure.add_subplot(211)
-        ax2 = self.figure.add_subplot(212)
+        self.ax1 = self.figure.add_subplot(211)
+        self.ax2 = self.figure.add_subplot(212)
 
         # 统一字体大小
         label_fontsize = 12
@@ -215,43 +234,29 @@ class VDIFViewer(QWidget):
         tick_fontsize = 10
 
         # 设置坐标轴标签及字体大小
-        ax1.set_xlabel("Frequency (MHz)", fontsize=label_fontsize)
-        ax1.set_ylabel("Amplitude", fontsize=label_fontsize)
-        ax2.set_xlabel("Frequency (MHz)", fontsize=label_fontsize)
-        ax2.set_ylabel("Phase (radians)", fontsize=label_fontsize)
+        self.ax1.set_xlabel("Frequency (MHz)", fontsize=label_fontsize)
+        self.ax1.set_ylabel("Amplitude", fontsize=label_fontsize)
+        self.ax2.set_xlabel("Frequency (MHz)", fontsize=label_fontsize)
+        self.ax2.set_ylabel("Phase (radians)", fontsize=label_fontsize)
 
-        try:
-            data = self.tmp_data[self.current_frame]
-            freq = np.array(data[0][1:], dtype=float)
-            spectrum = np.array(data[1][1:], dtype=complex)
+        # 振幅图
+        # ax1.plot(freq, np.abs(spectrum), color='tab:blue', label='Amplitude')
+        self.ax1.set_title("Amplitude Spectrum", fontsize=title_fontsize, fontweight='bold')
+        self.ax1.grid(True, linestyle='--', alpha=0.7)
+        self.ax1.legend(fontsize=tick_fontsize)
+        self.ax1.tick_params(axis='both', labelsize=tick_fontsize)
+        self.ax1.margins(x=0)  # 紧贴x轴范围
 
-            # 振幅图
-            ax1.plot(freq, np.abs(spectrum), color='tab:blue', label='Amplitude')
-            ax1.set_title("Amplitude Spectrum", fontsize=title_fontsize, fontweight='bold')
-            ax1.grid(True, linestyle='--', alpha=0.7)
-            ax1.legend(fontsize=tick_fontsize)
-            ax1.tick_params(axis='both', labelsize=tick_fontsize)
-            ax1.margins(x=0)  # 紧贴x轴范围
-
-            # 相位图
-            ax2.plot(freq, np.angle(spectrum), color='tab:orange', label='Phase')
-            ax2.set_title("Phase Spectrum", fontsize=title_fontsize, fontweight='bold')
-            ax2.grid(True, linestyle='--', alpha=0.7)
-            ax2.legend(fontsize=tick_fontsize)
-            ax2.tick_params(axis='both', labelsize=tick_fontsize)
-            ax2.margins(x=0)
-
-        except Exception as e:
-            if text:
-                ax1.text(0.5, 0.5, text, ha='center', 
-                    va='center', fontsize=14, 
-                    color='red', fontweight='bold')
-            else:
-                ax1.text(0.5, 0.5, f"Error: {e}", 
-                    ha='center', va='center', 
-                    fontsize=14, color='red', 
-                    fontweight='bold')
-            # ax2.axis('off')
+        # 相位图
+        # ax2.plot(freq, np.angle(spectrum), color='tab:orange', label='Phase')
+        self.ax2.set_title("Phase Spectrum", fontsize=title_fontsize, fontweight='bold')
+        self.ax2.grid(True, linestyle='--', alpha=0.7)
+        self.ax2.legend(fontsize=tick_fontsize)
+        self.ax2.tick_params(axis='both', labelsize=tick_fontsize)
+        self.ax2.margins(x=0)
+        
+        self.amp_line = self.ax1.plot([], [], color='tab:blue')[0]
+        self.phase_line = self.ax2.plot([], [], color='tab:orange')[0]
 
         # 调整子图间距，避免标签重叠
         self.figure.tight_layout(pad=2.0)
@@ -280,5 +285,7 @@ class VDIFViewer(QWidget):
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     viewer = VDIFViewer()
+    # setup stylesheet
+    apply_stylesheet(app, theme='light_blue.xml')
     viewer.show()
     sys.exit(app.exec_())

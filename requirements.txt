@@ -1,0 +1,5 @@
+qt-material
+pyqt5
+matplotlib
+numpy
+baseband
