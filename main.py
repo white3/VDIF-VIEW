@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
     QTableView, QHeaderView, QMessageBox, QCheckBox
 )
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import (QStandardItemModel, QStandardItem)
+from PyQt5.QtGui import (QStandardItemModel, QStandardItem, QIcon)
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import vdiflib
@@ -39,6 +39,7 @@ class VDIFViewer(QWidget):
         return super().closeEvent(event)
 
     def init_ui(self):
+        self.setWindowIcon(QIcon('./icon.png'))
         main_layout = QHBoxLayout()
         left_layout = QVBoxLayout()
         right_layout = QVBoxLayout()
@@ -52,6 +53,9 @@ class VDIFViewer(QWidget):
         self.VDIF_settings_combo.setFixedWidth(125)
         self.VDIF_settings_checkbox = QCheckBox()
         self.VDIF_settings_checkbox.setChecked(False)
+        self.VDIF_settings_checkbox.setFixedWidth(200)
+        self.VDIF_settings_checkbox.setText("Enable Settings")
+        # self.VDIF_settings_checkbox.setToolTip("Enable manual VDIF settings input")
         self.VDIF_settings_checkbox.toggled.connect(
             lambda checked: self.VDIF_settings_combo.setEnabled(checked)
         )
@@ -68,6 +72,7 @@ class VDIFViewer(QWidget):
         self.FFT_size_label = QLabel("FFT Size:")
         self.FFT_size_label.setFixedWidth(100)
         self.FFT_size_spin = QSpinBox()
+        self.FFT_size_spin.setFixedWidth(125)
         self.FFT_size_spin.setMinimum(32)
         self.FFT_size_spin.setMaximum(4096)
         self.FFT_size_spin.setValue(1024)
@@ -96,23 +101,36 @@ class VDIFViewer(QWidget):
 
         nav_layout = QHBoxLayout()
         self.prev_button = QPushButton("< Prev Frame")
-        self.next_button = QPushButton("Next Frame >")
         self.prev_button.clicked.connect(self.prev_frame)
-        self.next_button.clicked.connect(self.next_frame)
 
+        self.current_frame_label = QLabel("Current Frame:")
+        self.current_frame_label.setFixedWidth(100)
         self.frame_spin = QSpinBox()
         self.frame_spin.setMinimum(0)
         self.frame_spin.setValue(0)
         self.frame_spin.valueChanged.connect(self.change_current_frame)
         self.frame_spin.setFixedWidth(100)
-        self.current_frame_label = QLabel("Current Frame:")
-        self.current_frame_label.setFixedWidth(100)
+
+        self.next_button = QPushButton("Next Frame >")
+        self.next_button.clicked.connect(self.next_frame)
+
+        self.reduce_label = QLabel("View Max Amp:")
+        self.reduce_label.setFixedWidth(100)
+        self.reduce_spin = QDoubleSpinBox()
+        self.reduce_spin.setMinimum(-1)
+        self.reduce_spin.setMaximum(np.inf)
+        self.reduce_spin.setValue(-1)
+        self.reduce_spin.valueChanged.connect(self.plot_current_frame)
+        self.reduce_spin.setFixedWidth(125)
+
+        nav_layout.addWidget(self.reduce_label)
+        nav_layout.addWidget(self.reduce_spin)
         nav_layout.addWidget(self.prev_button)
         nav_layout.addWidget(self.current_frame_label)
         nav_layout.addWidget(self.frame_spin)
         nav_layout.addWidget(self.next_button)
         left_layout.addLayout(nav_layout)
-        left_layout.addWidget(self.canvas)
+        left_layout.addWidget(self.canvas, stretch=1)
 
         self.model = QStandardItemModel(15, 2)
         self.model.setHorizontalHeaderLabels(["VDIFHeaderField", "value"])
@@ -122,8 +140,6 @@ class VDIFViewer(QWidget):
         self.tableview.setFixedWidth(400)
         self.tableview.setColumnWidth(0, 240)
         self.tableview.setColumnWidth(1, 160)
-
-        self.tableview.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
         # 关联 QTableView控件和 Model
         self.tableview.setModel(self.model)
@@ -159,6 +175,10 @@ class VDIFViewer(QWidget):
             self.model.setItem(i, 0, QStandardItem(str(field_name)))
             self.model.setItem(i, 1, QStandardItem(str(field_value)))
             i += 1
+        
+        header = self.tableview.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # 第0列自适应内容
+        header.setSectionResizeMode(1, QHeaderView.Stretch)           # 第1列填满剩余空间
     
     def alert(self, title="Error", text="The VDIF data duration should exceed 1 second!"):
         dlg = QMessageBox(self)
@@ -188,7 +208,6 @@ class VDIFViewer(QWidget):
             parent=self
         )
         if self.ready2plot:
-            self.prcthread.setDaemon(False)
             self.prcthread.start()
             self.ready2plot = False
 
@@ -205,8 +224,18 @@ class VDIFViewer(QWidget):
             freq = np.array(data[0][1:], dtype=float)
             spectrum = np.array(data[1][1:], dtype=complex)
 
-            self.amp_line.set_data(freq, np.abs(spectrum))
-            self.phase_line.set_data(freq, np.angle(spectrum))
+            peak_max = self.reduce_spin.value()
+            amp = np.abs(spectrum)
+            phase = np.angle(spectrum)
+
+            # 找到振幅中最大的 n 个索引
+            if peak_max > 0:
+                filter_amp = amp < peak_max
+                self.amp_line.set_data(freq[filter_amp], amp[filter_amp])
+                self.phase_line.set_data(freq[filter_amp], phase[filter_amp])
+            else:
+                self.amp_line.set_data(freq, amp)
+                self.phase_line.set_data(freq, phase)
 
             self.ax1.relim()
             self.ax1.autoscale_view()

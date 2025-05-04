@@ -112,12 +112,12 @@ def read_vdif_frame(f, channel=1, vtype='real', count=None):
                 result[i]+=data[i::channel]
     return result
 
-def read_vdif_frame_by_input(f, channel=1, vtype='real', bits=2, count=None):
+def read_vdif_frame_by_input(f, count, channel=1, vtype='real', bits=2):
     result = [[]]*channel
-    for h, b in vh.get_VDIFs(f, count):
-        if b is None:
-            return None
-        # print(h.data_frame_number, h.data_frame_length, h.bits_per_sample, h.num_channels)
+    vdifs = vh.get_VDIFs(f, count)
+    if not vdifs:
+        return None, False
+    for h, b in vdifs:
         if h.invalid_flag:
             continue
         data = list(decode_quantized_samples(b, bits))
@@ -127,7 +127,7 @@ def read_vdif_frame_by_input(f, channel=1, vtype='real', bits=2, count=None):
         elif vtype =='real':
             for i in range(channel):
                 result[i]+=data[i::channel]
-    return result
+    return result, True
 
 def vdif_config2str(vdif_config):
     if 'bandwidth' in vdif_config and 'channels' in vdif_config and 'bits' in vdif_config:
@@ -218,25 +218,27 @@ class VDIFProcessThread(threading.Thread):
         idx = 0
         with open(self.vdif_path, 'rb') as f:
             while self.isProcessAlive():
-                print(f"Processing batch {idx+1}/{frames}")
-                data = read_vdif_frame_by_input(f=f, 
+                print(f"Processing batch {idx+1} ({frames} frames)")
+                data, f_stat = read_vdif_frame_by_input(f=f,
+                    count=frames,
                     channel=self.proc_params['channels'], 
                     vtype=self.stats['DATA_TYPE'], 
-                    bits=self.proc_params['bits'], 
-                    count=frames)
-                if data is None or len(data) == 0:
+                    bits=self.proc_params['bits'])
+                if not f_stat:
+                    print(f"End of file {self.vdif_path}")
                     break
                 output = []
-                print(f"Processing batch {idx+1}/{frames} - FFT")
+                print(f"Processing batch {idx+1} ({frames} frames) - FFT")
                 for ichan in range(self.proc_params['channels']):
                     spectrum = np.zeros(fftsize//2, dtype=np.complex64)
                     for i in range(0, len(data[ichan]), fftsize):
                         temp = data[ichan][i:i+fftsize]
                         spectrum_tmp = np.fft.fft(temp)[:fftsize//2]
-                        spectrum += spectrum_tmp / (fftsize//2)
+                        spectrum += spectrum_tmp / (len(data[ichan]) * 2 / fftsize)
                     output.append(spectrum)
                 # np.save(out_path, np.array(output))
                 self.tmp_data.append([freq, np.concatenate(output, axis=0)])
+                print(f"Processing batch {idx+1} ({frames} frames) - Plot")
                 if idx == 0:
                     self.parent.plot_current_frame()
                 self.parent.plotnum.increment()

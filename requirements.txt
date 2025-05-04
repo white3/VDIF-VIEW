@@ -1,4 +1,4 @@
-qt-material
+pyqtdarktheme
 pyqt5
 matplotlib
 numpy
