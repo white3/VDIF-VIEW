@@ -4,6 +4,7 @@ import vdifheader as vh
 import numpy as np
 import threading
 from datetime import datetime, timedelta
+import math
 
 # Lookup tables for 1-bit and 2-bit quantization (example mappings)
 ONE_BIT_MAP = {0: -1.0, 1: 1.0}
@@ -183,7 +184,7 @@ def parse_vdif_config(vdifstr='8000-512-16-2'):
         return None
 
 class VDIFProcessThread(threading.Thread):
-    def __init__(self, vdifstr, integration, fftsize, stats, vdif_path, tmp_data, parent=None):
+    def __init__(self, vdifstr, integration, fftsize, stats, vdif_path, qt_queue, parent=None):
         threading.Thread.__init__(self)
         self.proc_params = parse_vdif_config(vdifstr=vdifstr)
         self.integration = integration
@@ -191,8 +192,14 @@ class VDIFProcessThread(threading.Thread):
         self.stats = copy.deepcopy(stats)
         self.stats['running'] = True
         self.vdif_path = vdif_path
-        self.tmp_data = tmp_data
+        self.qt_queue = qt_queue
         self.parent = parent
+        self.output = {
+            'frames': 0,
+            'err_frames': 0,
+            'start_time': None,
+            'end_time': None,
+        }
         self.stats['lock'] = threading.Lock()
 
     def stopProcess(self):
@@ -205,61 +212,103 @@ class VDIFProcessThread(threading.Thread):
 
     def run(self):
         print(f"Processing {self.vdif_path} with {self.proc_params}")
-        integration = self.integration
-        frames = integration * self.proc_params['bandwidth'] * 2 \
-            *self.proc_params['bits']/8*1000000 \
-            /self.proc_params['fbodybytes']
-        if self.stats['DATA_TYPE'] == 'complex':
-            frames *= 2
-        frame_bytes_num = self.proc_params['fbodybytes'] + vh.VDIF_HEADER_BYTES
-        frames = int(frames)
-        # 1秒的字节数
-        fftsize = self.fftsize
-        print(f"Processing {frames} frames with {fftsize} FFT size")
 
+        nbits = self.proc_params['bits']
+        nchan = self.proc_params['channels']
+        bandw = self.proc_params['bandwidth']
+        vtype = self.stats['DATA_TYPE']
+        fbodybytes = self.proc_params['fbodybytes']
+        frame_bytes_num = self.proc_params['fbodybytes'] + vh.VDIF_HEADER_BYTES
+        fftsize = self.fftsize
+        fbodynum = fbodybytes * 8 // nbits
+        integration = self.integration
+        self.output['ffted_data'] = np.zeros((nchan, fftsize), dtype=np.complex64)
+        
         freq = []
-        for i in range(self.proc_params['channels']):
-            freq.append(np.linspace(
-                self.proc_params['bandwidth']/self.proc_params['channels']*i, 
-                self.proc_params['bandwidth']/self.proc_params['channels']*(i+1), 
-                int(fftsize//2)))
+        for i in range(nchan):
+            freq.append(np.linspace(bandw/nchan*i, 
+                bandw/nchan*(i+1), int(fftsize//2)))
             
+        frames_num = integration * bandw * 2e6 / fbodynum
+        if vtype == 'complex':
+            frames_num *= 2
+        read_frames_num = int(frames_num)
+        if read_frames_num < frames_num:
+            read_frames_num += 1
+        # 依次循环FFT数量
+        nfft = abs(fftsize * fbodynum) // math.gcd(fftsize, fbodynum) 
+        # 一次循环读取数据数量
+        nframes = nfft * fftsize // fbodynum
+        nloops = read_frames_num // nframes
+        print(f"Processing {nframes} frames with {fftsize} points for {nfft} FFTs in each loop")
+
         idx = 0
+        # 一直积分到结束
         with open(self.vdif_path, 'rb') as fvdif:
             while self.isProcessAlive():
-                # frame_bytes = fvdif.read(frame_bytes_num)
-                print(f"Processing batch {idx+1} ({frames} frames)")
-                data, f_stat = read_vdif_frame_by_input(f=fvdif,
-                    count=frames,
-                    channel=self.proc_params['channels'], 
-                    vtype=self.stats['DATA_TYPE'], 
-                    bits=self.proc_params['bits'])
-                if not f_stat:
-                    print(f"End of file {self.vdif_path}")
-                    break
-                output = []
-                print(f"Processing batch {idx+1} ({frames} frames) - FFT")
-                for ichan in range(self.proc_params['channels']):
-                    spectrum = np.zeros(fftsize//2, dtype=np.complex64)
-                    for ifft in range(0, len(data[ichan]), fftsize):
-                        temp = data[ichan][ifft:ifft+fftsize]
-                        spectrum_tmp = np.fft.fft(temp)[:fftsize//2]
-                        spectrum += spectrum_tmp / (len(data[ichan]) * 2 / fftsize)
-                    output.append(spectrum)
-                # np.save(out_path, np.array(output))
-                # self.tmp_data.append([freq, np.concatenate(output, axis=0)])
-                self.tmp_data.append([freq, output])
-                print(f"Processing batch {idx+1} ({frames} frames) - Plot")
-                if idx == 0:
-                    self.parent.plot_current_frame()
-                self.parent.plotnum.increment()
+                # read nframes frames that bodysize is fbodybytes by filehandle fvdif
+                print(f"Reading {nframes} frames from {self.vdif_path}")
+                fhead01, rframes, vdatas = read_vdif(fvdif, nframes, fbodybytes)
+                self.output['frames'] += rframes
+                self.output['err_frames'] += rframes - nframes
+                vdatas_float = decode_quantized_samples(vdatas, nbits)
+
+                # channel by channel
+                print(f"Processing batch {idx+1} ({nframes} frames) - Channel")
+                vdata_chaned = [[]]*nchan
+                if vtype == 'complex':
+                    for ichan in range(nchan):
+                        vdata_chaned[ichan].append(
+                            np.array(vdatas_float[ichan::nchan] + \
+                                     1j*vdatas_float[1::nchan]))
+                elif vtype =='real':
+                    for ichan in range(nchan):
+                        vdata_chaned[ichan].append(vdatas_float[ichan::nchan])
+
+                # FFT, vdata_chaned: [nchan][nfft*fftsize]
+                print(f"Processing batch {idx+1} ({nframes} frames / {nfft} FFTs) - FFT")
+                vdata_reshaped = np.array(vdata_chaned).reshape((nchan, nfft, fftsize))
+                # 对每个通道的每段做 FFT，axis=-1 指对最后一个维度做 fft
+                # 形状 (nchan, nfft, fftsize)
+                fft_result = np.fft.fft(vdata_reshaped, axis=-1)  
+                # 沿 nfft 维度累加，得到每个通道的累积 fft 结果
+                accum_fft = np.sum(fft_result, axis=1)  
+                # 形状 (nchan, fftsize)
+
+                print(f"Put {fftsize} FFT data to queue")
+                self.qt_queue.put(accum_fft/nfft)
+                self.output['ffted_data'] += accum_fft / nfft
                 idx += 1
+        self.output['end_time'] = fhead01[1].REFERENCE_EPOCH + timedelta(seconds=fhead01[1].SECONDS_FROM_EPOCH)
+        self.parent.plotnum.increment()
+
+def read_vdif(f, count, fbodybytes):
+    fhead = f.read(vh.VDIF_HEADER_BYTES)
+    fhead01 = [fhead]
+    rframes = 0
+    vdatas = b''
+    icount = 0
+    while rframes < count:
+        if not fhead:
+            break
+        fhead = vh.VDIFHeader.parse(fhead)
+        icount += 1
+        if fhead.invalid_flag:
+            continue
+        fbody = f.read(fbodybytes)
+        if len(fbody)!= fbodybytes:
+            break
+        vdata = fbody
+        vdatas+=vdata
+        rframes += 1
+        fhead = f.read(vh.VDIF_HEADER_BYTES)
+    fhead01.append(fhead)
+    return fhead01, rframes, vdatas
 
 if __name__ == '__main__':
     vdif_path = './data/testpeb1_01min.vdif'
     vdif_path="../gpu_pulsar_pipeline/res/a2102gt6.vdif"
     # stats = analyze_vdif_file(vdif_path)
-    # print(stats)
 
     with open(vdif_path, 'rb') as f:
         r = vh.get_VDIFs(f)

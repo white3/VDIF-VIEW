@@ -1,3 +1,4 @@
+import copy
 import sys
 import os
 import numpy as np
@@ -15,6 +16,7 @@ import vdiflib
 from datetime import datetime, timezone
 #from qt_material import apply_stylesheet
 import qdarktheme
+import queue
 
 class VDIFViewer(QWidget):
     def __init__(self):
@@ -24,12 +26,15 @@ class VDIFViewer(QWidget):
         self.current_frame = 0
         self.vdif_path = None
         # data cache for background processing
+        self.vdifqueue = queue.Queue()
         self.tmp_data = []
         # data cache for plotting
         self.plotnum = vdiflib.AtomicInt(-1)
         # data cache for processing parameters
         self.stats = {'CHANNELS_BAND': '32.00 MHz', 'INVALID_FLAG': False, 'LEGACY_MODE': False, 'REFERENCE_EPOCH': datetime(2022, 1, 1, 0, 0, tzinfo=timezone.utc), 'SECONDS_FROM_EPOCH': 1155000, 'UNASSIGNED_FIELD': 0, 'DATA_FRAME_NUMBER': 1999, 'VDIF_VERSION': 0, 'NUM_CHANNELS': 1, 'DATA_FRAME_LENGTH': 8032, 'BITS_PER_SAMPLE': 2, 'THREAD_ID': 0, 'EXTENDED_DATA_VERSION': 0, 'DATA_TYPE': 'real', 'STATION_ID': 'NA', 'EXTENDED_DATA': {}}
         self.prcthread = None
+        self.plotthread = PlotUpdateThread(self.vdifqueue, self)
+        self.plotthread.start()
         self.ready2plot = False
         self.vdif_config = {
             'bandwidth': 512.0,
@@ -41,6 +46,7 @@ class VDIFViewer(QWidget):
 
     def closeEvent(self, event):
         print("Closing VDIF Viewer")
+        self.plotthread.stop()
         if self.prcthread:
             self.prcthread.stopProcess()
         return super().closeEvent(event)
@@ -228,14 +234,17 @@ class VDIFViewer(QWidget):
             fftsize=self.FFT_size_spin.value(),
             stats=self.stats,
             vdif_path=self.vdif_path,
-            tmp_data=self.tmp_data,
+            qt_queue=self.vdifqueue,
             parent=self
         )
         self.vdif_config = vdiflib.vdif_config2str(self.VDIF_settings_combo.text())
-        self.channel_spin.setMaximum(self.vdif_config['channels']-1)
+        self.channel_spin.setMaximum(int(self.vdif_config['channels']-1))
         if self.ready2plot:
             self.prcthread.start()
             self.ready2plot = False
+
+    def update_data(self, data):
+        self.tmp_data = data
 
     def plot_current_frame(self, text=None):
         if self.current_frame >= self.plotnum.get():
@@ -246,8 +255,8 @@ class VDIFViewer(QWidget):
             self.frame_spin.setValue(self.current_frame)
 
         try:
-            data = self.tmp_data[self.current_frame]
-            print(np.shape(data))
+            data = copy.deepcopy(self.tmp_data)
+            print("ploted data shape:", np.shape(data))
 
             ichan = self.channel_spin.value()
             if ichan == -1:
@@ -306,7 +315,7 @@ class VDIFViewer(QWidget):
         # ax1.plot(freq, np.abs(spectrum), color='tab:blue', label='Amplitude')
         self.ax1.set_title("Amplitude Spectrum", fontsize=title_fontsize, fontweight='bold')
         self.ax1.grid(True, linestyle='--', alpha=0.7)
-        self.ax1.legend(fontsize=tick_fontsize)
+        # self.ax1.legend(fontsize=tick_fontsize)
         self.ax1.tick_params(axis='both', labelsize=tick_fontsize)
         self.ax1.margins(x=0)  # 紧贴x轴范围
 
@@ -314,7 +323,7 @@ class VDIFViewer(QWidget):
         # ax2.plot(freq, np.angle(spectrum), color='tab:orange', label='Phase')
         self.ax2.set_title("Phase Spectrum", fontsize=title_fontsize, fontweight='bold')
         self.ax2.grid(True, linestyle='--', alpha=0.7)
-        self.ax2.legend(fontsize=tick_fontsize)
+        # self.ax2.legend(fontsize=tick_fontsize)
         self.ax2.tick_params(axis='both', labelsize=tick_fontsize)
         self.ax2.margins(x=0)
         
@@ -329,12 +338,6 @@ class VDIFViewer(QWidget):
         self.current_frame = self.frame_spin.value()
         self.plot_current_frame()
 
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Left:
-            self.prev_frame()
-        elif event.key() == Qt.Key_Right:
-            self.next_frame()
-
     def prev_frame(self):
         self.current_frame = max(0, self.current_frame - 1)
         self.frame_spin.setValue(self.current_frame)
@@ -344,6 +347,35 @@ class VDIFViewer(QWidget):
         self.current_frame += 1
         self.frame_spin.setValue(self.current_frame)
         self.plot_current_frame()
+
+class PlotUpdateThread(threading.Thread):
+    def __init__(self, data_queue: queue.Queue, ui_object):
+        super().__init__()
+        self.data_queue = data_queue
+        self.ui_object = ui_object
+        self._stop_event = threading.Event()
+
+    def run(self):
+        while not self._stop_event.is_set():
+            try:
+                # 阻塞式获取数据，超时可设置为None无限等待
+                data = self.data_queue.get(block=True)
+                # 将数据填充到界面对象（假设有一个update_data方法）
+                if hasattr(self.ui_object, 'update_data'):
+                    self.ui_object.update_data(data)
+                # 调用界面对象的绘图函数（假设方法为draw_plot）
+                if hasattr(self.ui_object, 'plot_current_frame'):
+                    self.ui_object.plot_current_frame()
+                # 通知队列任务完成（可选）
+                self.data_queue.task_done()
+            except Exception as e:
+                # 捕获异常防止线程退出，可适当打印日志
+                print(f"PlotUpdateThread error: {e}")
+
+    def stop(self):
+        self._stop_event.set()
+        # 如果线程在阻塞队列获取，发送一个None或特殊标志唤醒线程退出
+        self.data_queue.put(None)
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
