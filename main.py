@@ -23,7 +23,6 @@ class VDIFViewer(QWidget):
         super().__init__()
         self.setWindowTitle("VDIF Viewer - With Stats Sidebar")
         self.resize(1480, 800)
-        self.current_frame = 0
         self.vdif_path = None
         # data cache for background processing
         self.vdifqueue = queue.Queue()
@@ -57,6 +56,7 @@ class VDIFViewer(QWidget):
         left_layout = QVBoxLayout()
         right_layout = QVBoxLayout()
         int_layout = QHBoxLayout()
+        file_label_layout = QHBoxLayout()
 
         self.VDIF_settings_label = QLabel("VDIF Settings:")
         self.VDIF_settings_label.setFixedWidth(100)
@@ -66,49 +66,29 @@ class VDIFViewer(QWidget):
         self.VDIF_settings_combo.setFixedWidth(125)
         self.VDIF_settings_checkbox = QCheckBox()
         self.VDIF_settings_checkbox.setChecked(False)
-        self.VDIF_settings_checkbox.setFixedWidth(200)
+        self.VDIF_settings_checkbox.setFixedWidth(150)
         self.VDIF_settings_checkbox.setText("Enable Settings")
-        # self.VDIF_settings_checkbox.setToolTip("Enable manual VDIF settings input")
         self.VDIF_settings_checkbox.toggled.connect(
             lambda checked: self.VDIF_settings_combo.setEnabled(checked)
         )
         self.file_label = QLabel("No file selected")
 
-        file_button = QPushButton("Select VDIF File")
-        file_button.clicked.connect(self.select_file)
-        file_label_layout = QHBoxLayout()
-        file_label_layout.addWidget(self.VDIF_settings_label)
-        file_label_layout.addWidget(self.VDIF_settings_combo)
-        file_label_layout.addWidget(self.VDIF_settings_checkbox)
-        file_label_layout.addWidget(self.file_label)
+        self.file_button = QPushButton("Select VDIF File")
+        self.file_button.clicked.connect(self.select_file)
+        self.file_button.setFixedWidth(200)
 
         self.FFT_size_label = QLabel("FFT Size:")
         self.FFT_size_label.setFixedWidth(100)
         self.FFT_size_spin = QSpinBox()
         self.FFT_size_spin.setFixedWidth(125)
         self.FFT_size_spin.setMinimum(32)
-        self.FFT_size_spin.setMaximum(4096)
-        self.FFT_size_spin.setValue(1000)
-
-        intg_label = QLabel("Integration (seconds):")
-        intg_label.setFixedWidth(150)
-        self.integration_spin = QDoubleSpinBox()
-        self.integration_spin.setMinimum(0.0)
-        self.integration_spin.setValue(0.1)
-        self.integration_spin.setValue(0.1)
-        self.integration_spin.setFixedWidth(75)
+        self.FFT_size_spin.setMaximum(65536)
+        self.FFT_size_spin.setValue(2048)
         
         self.start_button = QPushButton("Plot")
+        self.start_button.setEnabled(False)
+        self.start_button.setFixedWidth(200)
         self.start_button.clicked.connect(self.start_background_processing)
-        int_layout.addWidget(self.FFT_size_label)
-        int_layout.addWidget(self.FFT_size_spin)
-        int_layout.addWidget(intg_label)
-        int_layout.addWidget(self.integration_spin)
-        int_layout.addWidget(file_button)
-        int_layout.addWidget(self.start_button)
-
-        left_layout.addLayout(file_label_layout)
-        left_layout.addLayout(int_layout)
 
         self.figure = Figure(figsize=(12, 8))
         self.canvas = FigureCanvas(self.figure)
@@ -116,28 +96,13 @@ class VDIFViewer(QWidget):
         self.figure.clear()
         self.set_frame("Please select a VDIF file first.")
 
-        nav_layout = QHBoxLayout()
-        self.prev_button = QPushButton("< Prev Frame")
-        self.prev_button.clicked.connect(self.prev_frame)
-
-        self.current_frame_label = QLabel("Current Frame:")
-        self.current_frame_label.setFixedWidth(100)
-        self.frame_spin = QSpinBox()
-        self.frame_spin.setMinimum(0)
-        self.frame_spin.setValue(0)
-        self.frame_spin.valueChanged.connect(self.change_current_frame)
-        self.frame_spin.setFixedWidth(125)
-
         self.current_channel_label = QLabel("Current Channel:")
         self.current_channel_label.setFixedWidth(100)
         self.channel_spin = QSpinBox()
         self.channel_spin.setMinimum(-1)
         self.channel_spin.setValue(0)
-        self.channel_spin.valueChanged.connect(self.change_current_frame)
+        self.channel_spin.valueChanged.connect(self.plot_current_frame)
         self.channel_spin.setFixedWidth(125)
-
-        self.next_button = QPushButton("Next Frame >")
-        self.next_button.clicked.connect(self.next_frame)
 
         self.reduce_label = QLabel("View Max Amp:")
         self.reduce_label.setFixedWidth(100)
@@ -148,15 +113,24 @@ class VDIFViewer(QWidget):
         self.reduce_spin.valueChanged.connect(self.plot_current_frame)
         self.reduce_spin.setFixedWidth(125)
 
-        nav_layout.addWidget(self.reduce_label)
-        nav_layout.addWidget(self.reduce_spin)
-        nav_layout.addWidget(self.current_channel_label)
-        nav_layout.addWidget(self.channel_spin)
-        nav_layout.addWidget(self.current_frame_label)
-        nav_layout.addWidget(self.frame_spin)
-        nav_layout.addWidget(self.prev_button)
-        nav_layout.addWidget(self.next_button)
-        left_layout.addLayout(nav_layout)
+        file_label_layout.addWidget(self.file_button)
+        file_label_layout.addWidget(self.VDIF_settings_label)
+        file_label_layout.addWidget(self.VDIF_settings_combo)
+        file_label_layout.addWidget(self.VDIF_settings_checkbox)
+        file_label_layout.addWidget(self.file_label)
+        left_layout.addLayout(file_label_layout)
+        
+        int_layout.addWidget(self.start_button)
+        int_layout.addWidget(self.FFT_size_label)
+        int_layout.addWidget(self.FFT_size_spin)
+        int_layout.addWidget(self.reduce_label)
+        int_layout.addWidget(self.reduce_spin)
+        int_layout.addWidget(self.current_channel_label)
+        int_layout.addWidget(self.channel_spin)
+        int_layout.setAlignment(Qt.AlignLeft)
+        left_layout.addLayout(int_layout)
+
+        # left_layout.addLayout(nav_layout)
         left_layout.addWidget(self.canvas, stretch=1)
 
         self.model = QStandardItemModel(15, 2)
@@ -189,14 +163,14 @@ class VDIFViewer(QWidget):
             if self.stats.get('CHANNELS_BAND_MHz'):
                 vdifstr = "{:d}-{:d}-{:d}-{:d}".format(
                         int(self.stats['DATA_FRAME_LENGTH']-vdiflib.vh.VDIF_HEADER_BYTES), 
-                        int(self.stats['CHANNELS_BAND_MHz']*self.stats['NUM_CHANNELS']), 
+                        int(self.stats['BPS_MHz']), 
                         int(self.stats['NUM_CHANNELS']), 
                         int(self.stats['BITS_PER_SAMPLE']), 
                     )
                 self.vdif_config = vdiflib.parse_vdif_config(vdifstr)
                 self.VDIF_settings_combo.setText(vdifstr)
             else:
-                self.alert(title="Error", text="Please input the VDIF settings manually: \n8000-512-16-2\n<VDIF Body Length in bytes>-<band width in MHz>-<num channels>-<bits per sample>")
+                self.alert(title="Error", text="Please input the VDIF settings manually: \n8000-512-16-2\n<VDIF Body Length in bytes>-<bps in MHz>-<num channels>-<bits per sample>")
                 self.VDIF_settings_checkbox.setChecked(True)
             self.start_button.setEnabled(True)
 
@@ -208,8 +182,10 @@ class VDIFViewer(QWidget):
             i += 1
         
         header = self.tableview.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # 第0列自适应内容
-        header.setSectionResizeMode(1, QHeaderView.Stretch)           # 第1列填满剩余空间
+        # 第0列自适应内容
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)  
+        # 第1列填满剩余空间
+        header.setSectionResizeMode(1, QHeaderView.Stretch)           
     
     def alert(self, title="Error", text="The VDIF data duration should exceed 1 second!"):
         dlg = QMessageBox(self)
@@ -221,16 +197,12 @@ class VDIFViewer(QWidget):
 
     def start_background_processing(self):
         self.start_button.setEnabled(False)
-        # if self.stats.get('CHANNELS_BAND_MHz') is None:
-        #     self.alert()
-        #     return
         if self.prcthread:
             self.prcthread.stats["running"] = False
         self.plotnum = vdiflib.AtomicInt(-1)
         self.fftsize = self.FFT_size_spin.value()
         self.prcthread = vdiflib.VDIFProcessThread(
             vdifstr=self.VDIF_settings_combo.text(),
-            integration=self.integration_spin.value(),
             fftsize=self.fftsize,
             stats=self.stats,
             vdif_path=self.vdif_path,
@@ -261,13 +233,6 @@ class VDIFViewer(QWidget):
             self.last_plot_time = tmp_time
 
     def plot_current_frame(self, text=None):
-        if self.current_frame >= self.plotnum.get():
-            self.current_frame = self.plotnum.get()
-            self.frame_spin.setValue(self.current_frame)
-        elif self.current_frame < 0:
-            self.current_frame = 0
-            self.frame_spin.setValue(self.current_frame)
-
         try:
             data = copy.deepcopy(self.tmp_data)
 
@@ -348,20 +313,6 @@ class VDIFViewer(QWidget):
         # 调整子图间距，避免标签重叠
         self.figure.tight_layout(pad=2.0)
         self.canvas.draw()
-    
-    def change_current_frame(self):
-        self.current_frame = self.frame_spin.value()
-        self.plot_current_frame()
-
-    def prev_frame(self):
-        self.current_frame = max(0, self.current_frame - 1)
-        self.frame_spin.setValue(self.current_frame)
-        self.plot_current_frame()
-
-    def next_frame(self):
-        self.current_frame += 1
-        self.frame_spin.setValue(self.current_frame)
-        self.plot_current_frame()
 
 class PlotUpdateThread(threading.Thread):
     def __init__(self, data_queue: queue.Queue, ui_object):

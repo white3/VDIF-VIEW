@@ -89,7 +89,15 @@ def analyze_vdif_file(filepath):
     stats = {}
     header = vh.get_headers_second(filepath)
     if header:
-        stats['CHANNELS_BAND_MHz'] = (header.data_frame_number+1) * (header.data_frame_length - vh.VDIF_HEADER_BYTES) * 8.0 / header.bits_per_sample / header.num_channels / 1000000.0 / 2
+        # 总帧数 * 帧字节数 / 比特位数 / 通道数 / 1e6 = MHz
+        stats['CHANNELS_BAND_MHz'] = (header.data_frame_number+1) * \
+            (header.data_frame_length - vh.VDIF_HEADER_BYTES) * 8.0 \
+            / header.bits_per_sample / header.num_channels / 1000000.0 / 2
+        if header.data_type == 'complex':
+            stats['CHANNELS_BAND_MHz'] /= 2
+        stats['BPS_MHz'] = (header.data_frame_number+1) * \
+            (header.data_frame_length - vh.VDIF_HEADER_BYTES) \
+             * 8.0 / 1000000.0
         for k, v in header.to_dict.items():
             stats[k.name] = v
         stats['DATA_FRAME_NUMBER'] += 1
@@ -102,74 +110,36 @@ def analyze_vdif_file(filepath):
     seconds = header0.data_frame_number / stats['DATA_FRAME_NUMBER']
     stats['First Frame'] = header0.get_timestamp() + \
         timedelta(seconds=seconds)
-    return stats
-
-def read_vdif_frame(f, channel=1, vtype='real', count=None):
-    result = [[]]*channel
-    for h, b in vh.get_VDIFs(f, count):
-        # print(h.data_frame_number, h.data_frame_length, h.bits_per_sample, h.num_channels)
-        if h.invalid_flag:
-            continue
-        data = list(decode_quantized_samples(b, h.bits_per_sample))
-        if vtype == 'complex':
-            continue
-        elif vtype =='real':
-            for i in range(channel):
-                result[i]+=data[i::channel]
-    return result
-
-def read_vdif_frame_by_input(f, count, channel=1, vtype='real', bits=2):
-    result = [[]]*channel
-    vdifs = vh.get_VDIFs(f, count)
-    if not vdifs:
-        return None, False
-    for h, b in vdifs:
-        if h.invalid_flag:
-            continue
-        data = list(decode_quantized_samples(b, bits))
-        if vtype == 'complex':
-            for ichan in range(channel):
-                result[ichan].append(np.array(data[ichan::channel] + 1j*data[1::channel]))
-        elif vtype =='real':
-            for ichan in range(channel):
-                result[ichan].append(data[ichan::channel])
-    return result, True
-
-# def vdif_config2str(vdif_config):
-#     if 'bandwidth' in vdif_config and 'channels' in vdif_config and 'bits' in vdif_config:
-#         if 'threads' in vdif_config:
-#             return f"{vdif_config['bandwidth']}-{vdif_config['channels']}-{vdif_config['bits']}-{vdif_config['threads']}"
-#         else:
-#             return f"{vdif_config['bandwidth']}-{vdif_config['channels']}-{vdif_config['bits']}"
-#     else:
-#         return None 
+    return stats 
 
 def parse_vdif_config(vdifstr='8000-512-16-2'):
     tmp = vdifstr.strip().split('-')
     if len(tmp) == 4:
-        return {
+        vdifconf =  {
             'fbodybytes': int(tmp[0]), 
-            'bandwidth': float(tmp[1]),
+            'bps': float(tmp[1]),
             'channels': int(tmp[2]),
             'bits': int(tmp[3]),
             'threads': 1
         }
+        vdifconf['bandwidth'] = vdifconf['bps'] / vdifconf['bits'] / 2
     elif len(tmp) == 5:
-        return {
+        vdifconf =  {
             'fbodybytes': int(tmp[0]), 
-            'bandwidth': float(tmp[1]),
+            'bps': float(tmp[1]),
             'channels': int(tmp[2]),
             'bits': int(tmp[3]),
             'threads': int(tmp[4])
         }
+        vdifconf['bandwidth'] = vdifconf['bps'] / vdifconf['bits'] / 2
     else:
         return None
+    return vdifconf
 
 class VDIFProcessThread(threading.Thread):
-    def __init__(self, vdifstr, integration, fftsize, stats, vdif_path, qt_queue, parent=None):
+    def __init__(self, vdifstr, fftsize, stats, vdif_path, qt_queue, parent=None):
         threading.Thread.__init__(self)
         self.proc_params = parse_vdif_config(vdifstr=vdifstr)
-        self.integration = integration
         self.fftsize = fftsize
         self.stats = copy.deepcopy(stats)
         self.stats['running'] = True
@@ -227,7 +197,7 @@ class VDIFProcessThread(threading.Thread):
         with open(self.vdif_path, 'rb') as fvdif:
             while self.isProcessAlive():
                 # read nframes frames that bodysize is fbodybytes by filehandle fvdif
-                print(f"Reading {nframes} frames from {self.vdif_path}")
+                # print(f"Reading {nframes} frames from {self.vdif_path}")
                 fhead01, rframes, raframes, vdatas = read_vdif(fvdif, nframes, fbodybytes)
                 self.output['frames'] += rframes
                 self.output['err_frames'] += raframes - rframes
@@ -237,7 +207,7 @@ class VDIFProcessThread(threading.Thread):
                 vdatas_float = decode_quantized_samples(vdatas, nbits)
 
                 # channel by channel
-                print(f"Processing batch {idx+1} ({nframes} frames) - Channel")
+                # print(f"Processing batch {idx+1} ({nframes} frames) - Channel")
                 # 初始化 vdata_chaned 为列表长度 nfft，每个元素是 nchan 个空列表
                 vdata_chaned = [[None for _ in range(nchan)] for _ in range(nfft)]
 
@@ -249,6 +219,15 @@ class VDIFProcessThread(threading.Thread):
                             real_part = np.array(vdatas_float[ichan::nchan][start:end])
                             imag_part = np.array(vdatas_float[1::nchan][start:end])
                             vdata_chaned[ifft][ichan] = real_part + 1j * imag_part
+                        # FFT, vdata_chaned: [nchan][nfft*fftsize]
+                        # print(f"Processing batch {idx+1} ({nframes} frames / {ifft} FFTs / Total {nfft} FFTs) - FFT")
+                        fft_result = np.fft.fft(vdata_chaned[ifft], axis=-1)
+                        fft_amp = np.abs(fft_result) / nfft
+                        fft_phase = np.angle(fft_result)
+                        # 形状 (nchan, fftsize)
+                        # print(f"Put {fftsize} FFT data to queue")
+                        self.qt_queue.put(
+                            [fft_amp[:,:fftsize//2], fft_phase[:,:fftsize//2]])
                 elif vtype == 'real':
                     for ifft in range(nfft):
                         for ichan in range(nchan):
@@ -260,20 +239,21 @@ class VDIFProcessThread(threading.Thread):
                                 vdatas_float[ichan::nchan][start:end])
                         
                         # FFT, vdata_chaned: [nchan][nfft*fftsize]
-                        print(f"Processing batch {idx+1} ({nframes} frames / {ifft} FFTs / Total {nfft} FFTs) - FFT")
+                        # print(f"Processing batch {idx+1} ({nframes} frames / {ifft} FFTs / Total {nfft} FFTs) - FFT")
                         fft_result = np.fft.fft(vdata_chaned[ifft], axis=-1)
                         fft_amp = np.abs(fft_result) / nfft
                         fft_phase = np.angle(fft_result)
                         # 形状 (nchan, fftsize)
-                        print(f"Put {fftsize} FFT data to queue")
+                        # print(f"Put {fftsize} FFT data to queue")
                         self.qt_queue.put(
                             [fft_amp[:,:fftsize//2], fft_phase[:,:fftsize//2]])
                 idx += 1
-                self.output['Last Frame'] = fhead01[1].get_timestamp()
+                last_frame = fhead01[1]
         
-        seconds = fhead01[1].data_frame_number / self.stats['DATA_FRAME_NUMBER']
-        self.output['Last Frame'] = fhead01[1].get_timestamp() + \
+        seconds = last_frame.data_frame_number / self.stats['DATA_FRAME_NUMBER']
+        self.output['Last Frame'] = last_frame.get_timestamp() + \
             timedelta(seconds=seconds)
+        self.output['Duration (seconds)'] = (self.output['Last Frame'] - self.stats['First Frame']).total_seconds()
         self.parent.update_stats(self.output)
 
 def power_to_db(power, ref=1.0, floor_db=-np.inf):
@@ -309,13 +289,14 @@ def read_vdif(f, count, fbodybytes):
     while True:
         try:
             fhead = vh.VDIFHeader.parse(fhead_bytes)
+            flag = True
         except:
-            fhead = None
+            flag = False
         fbody = f.read(fbodybytes)
         if len(fbody)!= fbodybytes:
             break
         icount += 1
-        if fhead != None and not fhead.invalid_flag:
+        if flag and not fhead.invalid_flag:
             vdata = fbody
             vdatas+=vdata
             rframes += 1
