@@ -34,3 +34,8 @@ fft_result = np.fft.fft(vdata_reshaped, axis=-1)  # 形状 (nchan, nfft, fftsize
 accum_fft = np.sum(fft_result, axis=1)  # 形状 (nchan, fftsize)
 
 # accum_fft 即为最终结果
+v1 = fft_result[0][0][1]
+v2 = fft_result[0][0][2]
+print(np.abs(v1), np.abs(v2))
+print(np.abs(v1+v2))
+print(np.abs(v1) + np.abs(v2))

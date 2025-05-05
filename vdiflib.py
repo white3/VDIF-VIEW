@@ -143,25 +143,6 @@ def read_vdif_frame_by_input(f, count, channel=1, vtype='real', bits=2):
 #     else:
 #         return None 
 
-def vdif_config2str(vdifstr='512-16-2'):
-    tmp = vdifstr.strip().split('-')
-    if len(tmp) == 3:
-        return {
-            'bandwidth': int(tmp[0]),
-            'channels': float(tmp[1]),
-            'bits': int(tmp[2]),
-            'threads': 1
-        }
-    elif len(tmp) == 4:
-        return {
-            'bandwidth': int(tmp[0]),
-            'channels': float(tmp[1]),
-            'bits': int(tmp[2]),
-            'threads': int(tmp[3])
-        }
-    else:
-        return None
-
 def parse_vdif_config(vdifstr='8000-512-16-2'):
     tmp = vdifstr.strip().split('-')
     if len(tmp) == 4:
@@ -209,6 +190,16 @@ class VDIFProcessThread(threading.Thread):
     def isProcessAlive(self):
         with self.stats['lock']:
             return self.stats['running']
+        
+    def getFreq(self):
+        nchan = self.proc_params['channels']    
+        bandw = self.proc_params['bandwidth']  
+        fftsize = self.fftsize 
+        freq = []
+        for ifft in range(nchan):
+            freq.append(np.linspace(bandw/nchan*ifft, 
+                bandw/nchan*(ifft+1), int(fftsize//2)))
+        return np.array(freq)
 
     def run(self):
         print(f"Processing {self.vdif_path} with {self.proc_params}")
@@ -223,11 +214,6 @@ class VDIFProcessThread(threading.Thread):
         fbodynum = fbodybytes * 8 // nbits
         integration = self.integration
         self.output['ffted_data'] = np.zeros((nchan, fftsize), dtype=np.complex64)
-        
-        freq = []
-        for i in range(nchan):
-            freq.append(np.linspace(bandw/nchan*i, 
-                bandw/nchan*(i+1), int(fftsize//2)))
             
         frames_num = integration * bandw * 2e6 / fbodynum
         if vtype == 'complex':
@@ -255,32 +241,61 @@ class VDIFProcessThread(threading.Thread):
 
                 # channel by channel
                 print(f"Processing batch {idx+1} ({nframes} frames) - Channel")
-                vdata_chaned = [[]]*nchan
+                # 初始化 vdata_chaned 为列表长度 nfft，每个元素是 nchan 个空列表
+                vdata_chaned = [[None for _ in range(nchan)] for _ in range(nfft)]
+
                 if vtype == 'complex':
-                    for ichan in range(nchan):
-                        vdata_chaned[ichan].append(
-                            np.array(vdatas_float[ichan::nchan] + \
-                                     1j*vdatas_float[1::nchan]))
-                elif vtype =='real':
-                    for ichan in range(nchan):
-                        vdata_chaned[ichan].append(vdatas_float[ichan::nchan])
-
-                # FFT, vdata_chaned: [nchan][nfft*fftsize]
-                print(f"Processing batch {idx+1} ({nframes} frames / {nfft} FFTs) - FFT")
-                vdata_reshaped = np.array(vdata_chaned).reshape((nchan, nfft, fftsize))
-                # 对每个通道的每段做 FFT，axis=-1 指对最后一个维度做 fft
-                # 形状 (nchan, nfft, fftsize)
-                fft_result = np.fft.fft(vdata_reshaped, axis=-1)  
-                # 沿 nfft 维度累加，得到每个通道的累积 fft 结果
-                accum_fft = np.sum(fft_result, axis=1)  
-                # 形状 (nchan, fftsize)
-
-                print(f"Put {fftsize} FFT data to queue")
-                self.qt_queue.put(accum_fft/nfft)
-                self.output['ffted_data'] += accum_fft / nfft
+                    for ifft in range(nfft):
+                        for ichan in range(nchan):
+                            start = ifft * fftsize
+                            end = start + fftsize
+                            real_part = np.array(vdatas_float[ichan::nchan][start:end])
+                            imag_part = np.array(vdatas_float[1::nchan][start:end])
+                            vdata_chaned[ifft][ichan] = real_part + 1j * imag_part
+                elif vtype == 'real':
+                    for ifft in range(nfft):
+                        for ichan in range(nchan):
+                            # 按照你的填充方式，取第 i fft 块里 ichan 通道的 fftsize 数据
+                            # 计算起止索引
+                            start = ifft * fftsize
+                            end = start + fftsize
+                            vdata_chaned[ifft][ichan] = np.array(
+                                vdatas_float[ichan::nchan][start:end])
+                        
+                        # FFT, vdata_chaned: [nchan][nfft*fftsize]
+                        print(f"Processing batch {idx+1} ({nframes} frames / {ifft} FFTs / Total {nfft} FFTs) - FFT")
+                        fft_result = np.fft.fft(vdata_chaned[ifft], axis=-1)
+                        fft_amp = np.abs(fft_result) / nfft
+                        fft_phase = np.angle(fft_result)
+                        # 形状 (nchan, fftsize)
+                        print(f"Put {fftsize} FFT data to queue")
+                        self.qt_queue.put(
+                            [fft_amp[:,:fftsize//2], fft_phase[:,:fftsize//2]])
+                        # self.output['ffted_data'] += fft_result
+                        return 
                 idx += 1
-        self.output['end_time'] = fhead01[1].REFERENCE_EPOCH + timedelta(seconds=fhead01[1].SECONDS_FROM_EPOCH)
+        self.output['end_time'] = fhead01[1].get_timestamp()
         self.parent.plotnum.increment()
+
+def power_to_db(power, ref=1.0, floor_db=-np.inf):
+    """
+    将普通功率值转换为分贝(dB)。
+
+    参数：
+    - power: 输入功率值，标量或数组，必须非负。
+    - ref: 参考功率，默认为 1.0。
+    - floor_db: 最小dB值，用于限制结果下限，默认不限制。
+
+    返回：
+    - dB值，float或ndarray，与输入power同形状。
+    """
+    power = np.array(power, dtype=float)
+    # 避免对0取对数，设一个极小值替代0
+    power_clipped = np.clip(power, 1e-20, None)
+    db = 10 * np.log10(power_clipped / ref)
+    if floor_db != -np.inf:
+        db = np.maximum(db, floor_db)
+    return db
 
 def read_vdif(f, count, fbodybytes):
     fhead = f.read(vh.VDIF_HEADER_BYTES)

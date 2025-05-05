@@ -88,7 +88,7 @@ class VDIFViewer(QWidget):
         self.FFT_size_spin.setFixedWidth(125)
         self.FFT_size_spin.setMinimum(32)
         self.FFT_size_spin.setMaximum(4096)
-        self.FFT_size_spin.setValue(1024)
+        self.FFT_size_spin.setValue(1000)
 
         intg_label = QLabel("Integration (seconds):")
         intg_label.setFixedWidth(150)
@@ -193,7 +193,7 @@ class VDIFViewer(QWidget):
                         int(self.stats['NUM_CHANNELS']), 
                         int(self.stats['BITS_PER_SAMPLE']), 
                     )
-                self.vdif_config = vdiflib.vdif_config2str(vdifstr)
+                self.vdif_config = vdiflib.parse_vdif_config(vdifstr)
                 self.VDIF_settings_combo.setText(vdifstr)
             else:
                 self.alert(title="Error", text="Please input the VDIF settings manually: \n512-16-2\n<band width in MHz>-<num channels>-<bits per sample>")
@@ -226,25 +226,30 @@ class VDIFViewer(QWidget):
         #     return
         if self.prcthread:
             self.prcthread.stats["running"] = False
-        self.tmp_data = []
         self.plotnum = vdiflib.AtomicInt(-1)
+        self.fftsize = self.FFT_size_spin.value()
         self.prcthread = vdiflib.VDIFProcessThread(
             vdifstr=self.VDIF_settings_combo.text(),
             integration=self.integration_spin.value(),
-            fftsize=self.FFT_size_spin.value(),
+            fftsize=self.fftsize,
             stats=self.stats,
             vdif_path=self.vdif_path,
             qt_queue=self.vdifqueue,
             parent=self
         )
-        self.vdif_config = vdiflib.vdif_config2str(self.VDIF_settings_combo.text())
+        self.vdif_config = vdiflib.parse_vdif_config(self.VDIF_settings_combo.text())
         self.channel_spin.setMaximum(int(self.vdif_config['channels']-1))
         if self.ready2plot:
+            self.freq = self.prcthread.getFreq()
+            self.tmp_data = [
+                np.zeros((self.vdif_config['channels'], self.fftsize//2), dtype=float),
+                np.zeros((self.vdif_config['channels'], self.fftsize//2), dtype=complex)]
             self.prcthread.start()
             self.ready2plot = False
 
     def update_data(self, data):
-        self.tmp_data = data
+        self.tmp_data[0] += data[0]
+        self.tmp_data[1] = data[1]
 
     def plot_current_frame(self, text=None):
         if self.current_frame >= self.plotnum.get():
@@ -256,19 +261,20 @@ class VDIFViewer(QWidget):
 
         try:
             data = copy.deepcopy(self.tmp_data)
-            print("ploted data shape:", np.shape(data))
 
             ichan = self.channel_spin.value()
             if ichan == -1:
-                freq = np.concatenate(data[0], axis=0)
-                spectrum = np.concatenate(data[1], axis=0)
+                freq = np.concatenate(self.freq, axis=0)
+                amp = np.concatenate(data[0])
+                # amp = vdiflib.power_to_db(data[0])
+                phase = np.concatenate(data[1])
             else:
-                freq = data[0][ichan]
-                spectrum = np.array(data[1][ichan], dtype=complex)
+                freq = self.freq[ichan]
+                amp = data[0][ichan]
+                # amp = vdiflib.power_to_db(data[0])
+                phase = data[1][ichan]
 
             peak_max = self.reduce_spin.value()
-            amp = np.abs(spectrum)
-            phase = np.angle(spectrum)
 
             # 找到振幅中最大的 n 个索引
             if peak_max > 0:
@@ -357,20 +363,24 @@ class PlotUpdateThread(threading.Thread):
 
     def run(self):
         while not self._stop_event.is_set():
-            try:
-                # 阻塞式获取数据，超时可设置为None无限等待
-                data = self.data_queue.get(block=True)
-                # 将数据填充到界面对象（假设有一个update_data方法）
-                if hasattr(self.ui_object, 'update_data'):
-                    self.ui_object.update_data(data)
-                # 调用界面对象的绘图函数（假设方法为draw_plot）
-                if hasattr(self.ui_object, 'plot_current_frame'):
-                    self.ui_object.plot_current_frame()
-                # 通知队列任务完成（可选）
-                self.data_queue.task_done()
-            except Exception as e:
-                # 捕获异常防止线程退出，可适当打印日志
-                print(f"PlotUpdateThread error: {e}")
+            # try:
+            # 阻塞式获取数据，超时可设置为None无限等待
+            data = self.data_queue.get(block=True)
+            if data is None:
+                break
+            # print("PlotUpdateThread get data:", data.shape)
+            # 将数据填充到界面对象（假设有一个update_data方法）
+            if hasattr(self.ui_object, 'update_data'):
+                self.ui_object.update_data(np.array(data))
+            # 调用界面对象的绘图函数（假设方法为draw_plot）
+            if hasattr(self.ui_object, 'plot_current_frame'):
+                self.ui_object.plot_current_frame()
+            # 通知队列任务完成（可选）
+            # self.data_queue.task_done()
+            # except Exception as e:
+            #     e.with_traceback()
+            #     # 捕获异常防止线程退出，可适当打印日志
+            #     print(f"PlotUpdateThread error: {e}")
 
     def stop(self):
         self._stop_event.set()
