@@ -61,7 +61,7 @@ class VDIFViewer(QWidget):
         self.VDIF_settings_label = QLabel("VDIF Settings:")
         self.VDIF_settings_label.setFixedWidth(100)
         self.VDIF_settings_combo = QLineEdit()
-        self.VDIF_settings_combo.setPlaceholderText("512-16-2")
+        self.VDIF_settings_combo.setPlaceholderText("8000-512-16-2")
         self.VDIF_settings_combo.setEnabled(False)
         self.VDIF_settings_combo.setFixedWidth(125)
         self.VDIF_settings_checkbox = QCheckBox()
@@ -196,7 +196,7 @@ class VDIFViewer(QWidget):
                 self.vdif_config = vdiflib.parse_vdif_config(vdifstr)
                 self.VDIF_settings_combo.setText(vdifstr)
             else:
-                self.alert(title="Error", text="Please input the VDIF settings manually: \n512-16-2\n<band width in MHz>-<num channels>-<bits per sample>")
+                self.alert(title="Error", text="Please input the VDIF settings manually: \n8000-512-16-2\n<VDIF Body Length in bytes>-<band width in MHz>-<num channels>-<bits per sample>")
                 self.VDIF_settings_checkbox.setChecked(True)
             self.start_button.setEnabled(True)
 
@@ -239,6 +239,7 @@ class VDIFViewer(QWidget):
         )
         self.vdif_config = vdiflib.parse_vdif_config(self.VDIF_settings_combo.text())
         self.channel_spin.setMaximum(int(self.vdif_config['channels']-1))
+        self.last_plot_time = datetime.now().timestamp()
         if self.ready2plot:
             self.freq = self.prcthread.getFreq()
             self.tmp_data = [
@@ -247,9 +248,17 @@ class VDIFViewer(QWidget):
             self.prcthread.start()
             self.ready2plot = False
 
+    def update_stats(self, stats):
+        self.stats.update(stats)
+        self.display_stats(self.stats)
+
     def update_data(self, data):
         self.tmp_data[0] += data[0]
         self.tmp_data[1] = data[1]
+        tmp_time = datetime.now().timestamp()
+        if tmp_time - self.last_plot_time > 0.1:
+            self.plot_current_frame()
+            self.last_plot_time = tmp_time
 
     def plot_current_frame(self, text=None):
         if self.current_frame >= self.plotnum.get():
@@ -372,9 +381,6 @@ class PlotUpdateThread(threading.Thread):
             # 将数据填充到界面对象（假设有一个update_data方法）
             if hasattr(self.ui_object, 'update_data'):
                 self.ui_object.update_data(np.array(data))
-            # 调用界面对象的绘图函数（假设方法为draw_plot）
-            if hasattr(self.ui_object, 'plot_current_frame'):
-                self.ui_object.plot_current_frame()
             # 通知队列任务完成（可选）
             # self.data_queue.task_done()
             # except Exception as e:

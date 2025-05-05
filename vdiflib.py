@@ -99,8 +99,9 @@ def analyze_vdif_file(filepath):
             stats[k.name] = v
 
     header0 = vh.get_first_header(filepath)
-    stats['timestamp'] = header0.reference_epoch + \
-        timedelta(seconds=header0.seconds_from_epoch)
+    seconds = header0.data_frame_number / stats['DATA_FRAME_NUMBER']
+    stats['First Frame'] = header0.get_timestamp() + \
+        timedelta(seconds=seconds)
     return stats
 
 def read_vdif_frame(f, channel=1, vtype='real', count=None):
@@ -176,10 +177,9 @@ class VDIFProcessThread(threading.Thread):
         self.qt_queue = qt_queue
         self.parent = parent
         self.output = {
+            'Last Frame': None,
             'frames': 0,
             'err_frames': 0,
-            'start_time': None,
-            'end_time': None,
         }
         self.stats['lock'] = threading.Lock()
 
@@ -206,26 +206,20 @@ class VDIFProcessThread(threading.Thread):
 
         nbits = self.proc_params['bits']
         nchan = self.proc_params['channels']
-        bandw = self.proc_params['bandwidth']
         vtype = self.stats['DATA_TYPE']
         fbodybytes = self.proc_params['fbodybytes']
-        frame_bytes_num = self.proc_params['fbodybytes'] + vh.VDIF_HEADER_BYTES
         fftsize = self.fftsize
-        fbodynum = fbodybytes * 8 // nbits
-        integration = self.integration
-        self.output['ffted_data'] = np.zeros((nchan, fftsize), dtype=np.complex64)
-            
-        frames_num = integration * bandw * 2e6 / fbodynum
+        
         if vtype == 'complex':
-            frames_num *= 2
-        read_frames_num = int(frames_num)
-        if read_frames_num < frames_num:
-            read_frames_num += 1
+            fbodynum = fbodybytes * 4 // nbits
+        else:
+            fbodynum = fbodybytes * 8 // nbits
         # 依次循环FFT数量
-        nfft = abs(fftsize * fbodynum) // math.gcd(fftsize, fbodynum) 
+        nfbin = fbodynum // nchan
+        nfft = abs(fftsize * nfbin) // math.gcd(fftsize, nfbin) 
+        nfft = nfft // fftsize
         # 一次循环读取数据数量
-        nframes = nfft * fftsize // fbodynum
-        nloops = read_frames_num // nframes
+        nframes = nfft * fftsize // nfbin
         print(f"Processing {nframes} frames with {fftsize} points for {nfft} FFTs in each loop")
 
         idx = 0
@@ -234,9 +228,12 @@ class VDIFProcessThread(threading.Thread):
             while self.isProcessAlive():
                 # read nframes frames that bodysize is fbodybytes by filehandle fvdif
                 print(f"Reading {nframes} frames from {self.vdif_path}")
-                fhead01, rframes, vdatas = read_vdif(fvdif, nframes, fbodybytes)
+                fhead01, rframes, raframes, vdatas = read_vdif(fvdif, nframes, fbodybytes)
                 self.output['frames'] += rframes
-                self.output['err_frames'] += rframes - nframes
+                self.output['err_frames'] += raframes - rframes
+                if rframes != nframes:
+                    print(f"Warning: {rframes} frames read, but {nframes} expected")
+                    break
                 vdatas_float = decode_quantized_samples(vdatas, nbits)
 
                 # channel by channel
@@ -271,11 +268,13 @@ class VDIFProcessThread(threading.Thread):
                         print(f"Put {fftsize} FFT data to queue")
                         self.qt_queue.put(
                             [fft_amp[:,:fftsize//2], fft_phase[:,:fftsize//2]])
-                        # self.output['ffted_data'] += fft_result
-                        return 
                 idx += 1
-        self.output['end_time'] = fhead01[1].get_timestamp()
-        self.parent.plotnum.increment()
+                self.output['Last Frame'] = fhead01[1].get_timestamp()
+        
+        seconds = fhead01[1].data_frame_number / self.stats['DATA_FRAME_NUMBER']
+        self.output['Last Frame'] = fhead01[1].get_timestamp() + \
+            timedelta(seconds=seconds)
+        self.parent.update_stats(self.output)
 
 def power_to_db(power, ref=1.0, floor_db=-np.inf):
     """
@@ -298,27 +297,35 @@ def power_to_db(power, ref=1.0, floor_db=-np.inf):
     return db
 
 def read_vdif(f, count, fbodybytes):
-    fhead = f.read(vh.VDIF_HEADER_BYTES)
-    fhead01 = [fhead]
+    fhead_bytes = f.read(vh.VDIF_HEADER_BYTES)
+    try:
+        tmp = vh.VDIFHeader.parse(fhead_bytes)
+    except:
+        return None, 0, 0, b''
+    fhead01 = [tmp]
     rframes = 0
     vdatas = b''
     icount = 0
-    while rframes < count:
-        if not fhead:
-            break
-        fhead = vh.VDIFHeader.parse(fhead)
-        icount += 1
-        if fhead.invalid_flag:
-            continue
+    while True:
+        try:
+            fhead = vh.VDIFHeader.parse(fhead_bytes)
+        except:
+            fhead = None
         fbody = f.read(fbodybytes)
         if len(fbody)!= fbodybytes:
             break
-        vdata = fbody
-        vdatas+=vdata
-        rframes += 1
-        fhead = f.read(vh.VDIF_HEADER_BYTES)
+        icount += 1
+        if fhead != None and not fhead.invalid_flag:
+            vdata = fbody
+            vdatas+=vdata
+            rframes += 1
+        if rframes == count:
+            break
+        fhead_bytes = f.read(vh.VDIF_HEADER_BYTES)
+        if len(fhead_bytes)!= vh.VDIF_HEADER_BYTES:
+            break
     fhead01.append(fhead)
-    return fhead01, rframes, vdatas
+    return fhead01, rframes, icount, vdatas
 
 if __name__ == '__main__':
     vdif_path = './data/testpeb1_01min.vdif'
