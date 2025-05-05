@@ -3,6 +3,7 @@ import threading
 import vdifheader as vh
 import numpy as np
 import threading
+from datetime import datetime, timedelta
 
 # Lookup tables for 1-bit and 2-bit quantization (example mappings)
 ONE_BIT_MAP = {0: -1.0, 1: 1.0}
@@ -91,12 +92,15 @@ def analyze_vdif_file(filepath):
         for k, v in header.to_dict.items():
             stats[k.name] = v
         stats['DATA_FRAME_NUMBER'] += 1
-        return stats
     else:
         header = vh.get_first_header(filepath)
         for k, v in header.to_dict.items():
             stats[k.name] = v
-        return stats
+
+    header0 = vh.get_first_header(filepath)
+    stats['timestamp'] = header0.reference_epoch + \
+        timedelta(seconds=header0.seconds_from_epoch)
+    return stats
 
 def read_vdif_frame(f, channel=1, vtype='real', count=None):
     result = [[]]*channel
@@ -122,21 +126,21 @@ def read_vdif_frame_by_input(f, count, channel=1, vtype='real', bits=2):
             continue
         data = list(decode_quantized_samples(b, bits))
         if vtype == 'complex':
-            for i in range(channel):
-                result[i]+=np.array(data[i::channel] + 1j*data[1::channel])
+            for ichan in range(channel):
+                result[ichan].append(np.array(data[ichan::channel] + 1j*data[1::channel]))
         elif vtype =='real':
-            for i in range(channel):
-                result[i]+=data[i::channel]
+            for ichan in range(channel):
+                result[ichan].append(data[ichan::channel])
     return result, True
 
-def vdif_config2str(vdif_config):
-    if 'bandwidth' in vdif_config and 'channels' in vdif_config and 'bits' in vdif_config:
-        if 'threads' in vdif_config:
-            return f"{vdif_config['bandwidth']}-{vdif_config['channels']}-{vdif_config['bits']}-{vdif_config['threads']}"
-        else:
-            return f"{vdif_config['bandwidth']}-{vdif_config['channels']}-{vdif_config['bits']}"
-    else:
-        return None 
+# def vdif_config2str(vdif_config):
+#     if 'bandwidth' in vdif_config and 'channels' in vdif_config and 'bits' in vdif_config:
+#         if 'threads' in vdif_config:
+#             return f"{vdif_config['bandwidth']}-{vdif_config['channels']}-{vdif_config['bits']}-{vdif_config['threads']}"
+#         else:
+#             return f"{vdif_config['bandwidth']}-{vdif_config['channels']}-{vdif_config['bits']}"
+#     else:
+#         return None 
 
 def vdif_config2str(vdifstr='512-16-2'):
     tmp = vdifstr.strip().split('-')
@@ -157,21 +161,23 @@ def vdif_config2str(vdifstr='512-16-2'):
     else:
         return None
 
-def parse_vdif_config(vdifstr='512-16-2'):
+def parse_vdif_config(vdifstr='8000-512-16-2'):
     tmp = vdifstr.strip().split('-')
-    if len(tmp) == 3:
+    if len(tmp) == 4:
         return {
-            'bandwidth': float(tmp[0]),
-            'channels': int(tmp[1]),
-            'bits': int(tmp[2]),
+            'fbodybytes': int(tmp[0]), 
+            'bandwidth': float(tmp[1]),
+            'channels': int(tmp[2]),
+            'bits': int(tmp[3]),
             'threads': 1
         }
-    elif len(tmp) == 4:
+    elif len(tmp) == 5:
         return {
-            'bandwidth': float(tmp[0]),
-            'channels': int(tmp[1]),
-            'bits': int(tmp[2]),
-            'threads': int(tmp[3])
+            'fbodybytes': int(tmp[0]), 
+            'bandwidth': float(tmp[1]),
+            'channels': int(tmp[2]),
+            'bits': int(tmp[3]),
+            'threads': int(tmp[4])
         }
     else:
         return None
@@ -202,24 +208,28 @@ class VDIFProcessThread(threading.Thread):
         integration = self.integration
         frames = integration * self.proc_params['bandwidth'] * 2 \
             *self.proc_params['bits']/8*1000000 \
-            /(self.stats['DATA_FRAME_LENGTH']-vh.VDIF_HEADER_BYTES)
+            /self.proc_params['fbodybytes']
         if self.stats['DATA_TYPE'] == 'complex':
             frames *= 2
+        frame_bytes_num = self.proc_params['fbodybytes'] + vh.VDIF_HEADER_BYTES
         frames = int(frames)
         # 1秒的字节数
-        # self.proc_params['channels']*self.proc_params['bandwidth']*self.proc_params['bits']
         fftsize = self.fftsize
         print(f"Processing {frames} frames with {fftsize} FFT size")
 
-        freq = np.linspace(0, 
-            self.proc_params['bandwidth'], 
-            int(fftsize*self.proc_params['channels']//2))
+        freq = []
+        for i in range(self.proc_params['channels']):
+            freq.append(np.linspace(
+                self.proc_params['bandwidth']/self.proc_params['channels']*i, 
+                self.proc_params['bandwidth']/self.proc_params['channels']*(i+1), 
+                int(fftsize//2)))
             
         idx = 0
-        with open(self.vdif_path, 'rb') as f:
+        with open(self.vdif_path, 'rb') as fvdif:
             while self.isProcessAlive():
+                # frame_bytes = fvdif.read(frame_bytes_num)
                 print(f"Processing batch {idx+1} ({frames} frames)")
-                data, f_stat = read_vdif_frame_by_input(f=f,
+                data, f_stat = read_vdif_frame_by_input(f=fvdif,
                     count=frames,
                     channel=self.proc_params['channels'], 
                     vtype=self.stats['DATA_TYPE'], 
@@ -231,13 +241,14 @@ class VDIFProcessThread(threading.Thread):
                 print(f"Processing batch {idx+1} ({frames} frames) - FFT")
                 for ichan in range(self.proc_params['channels']):
                     spectrum = np.zeros(fftsize//2, dtype=np.complex64)
-                    for i in range(0, len(data[ichan]), fftsize):
-                        temp = data[ichan][i:i+fftsize]
+                    for ifft in range(0, len(data[ichan]), fftsize):
+                        temp = data[ichan][ifft:ifft+fftsize]
                         spectrum_tmp = np.fft.fft(temp)[:fftsize//2]
                         spectrum += spectrum_tmp / (len(data[ichan]) * 2 / fftsize)
                     output.append(spectrum)
                 # np.save(out_path, np.array(output))
-                self.tmp_data.append([freq, np.concatenate(output, axis=0)])
+                # self.tmp_data.append([freq, np.concatenate(output, axis=0)])
+                self.tmp_data.append([freq, output])
                 print(f"Processing batch {idx+1} ({frames} frames) - Plot")
                 if idx == 0:
                     self.parent.plot_current_frame()

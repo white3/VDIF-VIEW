@@ -30,6 +30,13 @@ class VDIFViewer(QWidget):
         # data cache for processing parameters
         self.stats = {'CHANNELS_BAND': '32.00 MHz', 'INVALID_FLAG': False, 'LEGACY_MODE': False, 'REFERENCE_EPOCH': datetime(2022, 1, 1, 0, 0, tzinfo=timezone.utc), 'SECONDS_FROM_EPOCH': 1155000, 'UNASSIGNED_FIELD': 0, 'DATA_FRAME_NUMBER': 1999, 'VDIF_VERSION': 0, 'NUM_CHANNELS': 1, 'DATA_FRAME_LENGTH': 8032, 'BITS_PER_SAMPLE': 2, 'THREAD_ID': 0, 'EXTENDED_DATA_VERSION': 0, 'DATA_TYPE': 'real', 'STATION_ID': 'NA', 'EXTENDED_DATA': {}}
         self.prcthread = None
+        self.ready2plot = False
+        self.vdif_config = {
+            'bandwidth': 512.0,
+            'channels': 16,
+            'bits': 2,
+            'threads': 1
+        }
         self.init_ui()
 
     def closeEvent(self, event):
@@ -76,18 +83,22 @@ class VDIFViewer(QWidget):
         self.FFT_size_spin.setMinimum(32)
         self.FFT_size_spin.setMaximum(4096)
         self.FFT_size_spin.setValue(1024)
-        int_layout.addWidget(self.FFT_size_label)
-        int_layout.addWidget(self.FFT_size_spin)
-        int_layout.addWidget(file_button)
 
-        int_layout.addWidget(QLabel("Integration (seconds):"))
+        intg_label = QLabel("Integration (seconds):")
+        intg_label.setFixedWidth(150)
         self.integration_spin = QDoubleSpinBox()
         self.integration_spin.setMinimum(0.0)
         self.integration_spin.setValue(0.1)
-        int_layout.addWidget(self.integration_spin)
+        self.integration_spin.setValue(0.1)
+        self.integration_spin.setFixedWidth(75)
         
         self.start_button = QPushButton("Plot")
         self.start_button.clicked.connect(self.start_background_processing)
+        int_layout.addWidget(self.FFT_size_label)
+        int_layout.addWidget(self.FFT_size_spin)
+        int_layout.addWidget(intg_label)
+        int_layout.addWidget(self.integration_spin)
+        int_layout.addWidget(file_button)
         int_layout.addWidget(self.start_button)
 
         left_layout.addLayout(file_label_layout)
@@ -109,7 +120,15 @@ class VDIFViewer(QWidget):
         self.frame_spin.setMinimum(0)
         self.frame_spin.setValue(0)
         self.frame_spin.valueChanged.connect(self.change_current_frame)
-        self.frame_spin.setFixedWidth(100)
+        self.frame_spin.setFixedWidth(125)
+
+        self.current_channel_label = QLabel("Current Channel:")
+        self.current_channel_label.setFixedWidth(100)
+        self.channel_spin = QSpinBox()
+        self.channel_spin.setMinimum(-1)
+        self.channel_spin.setValue(0)
+        self.channel_spin.valueChanged.connect(self.change_current_frame)
+        self.channel_spin.setFixedWidth(125)
 
         self.next_button = QPushButton("Next Frame >")
         self.next_button.clicked.connect(self.next_frame)
@@ -125,9 +144,11 @@ class VDIFViewer(QWidget):
 
         nav_layout.addWidget(self.reduce_label)
         nav_layout.addWidget(self.reduce_spin)
-        nav_layout.addWidget(self.prev_button)
+        nav_layout.addWidget(self.current_channel_label)
+        nav_layout.addWidget(self.channel_spin)
         nav_layout.addWidget(self.current_frame_label)
         nav_layout.addWidget(self.frame_spin)
+        nav_layout.addWidget(self.prev_button)
         nav_layout.addWidget(self.next_button)
         left_layout.addLayout(nav_layout)
         left_layout.addWidget(self.canvas, stretch=1)
@@ -148,6 +169,7 @@ class VDIFViewer(QWidget):
         main_layout.addLayout(left_layout)
         main_layout.addLayout(right_layout)
         self.setLayout(main_layout)
+        self.start_button.setEnabled(False)
 
     def select_file(self):
         path, _ = QFileDialog.getOpenFileName(self, 
@@ -159,15 +181,18 @@ class VDIFViewer(QWidget):
             self.display_stats(self.stats)
             self.ready2plot = True
             if self.stats.get('CHANNELS_BAND_MHz'):
-                self.VDIF_settings_combo.setText(
-                    "{:d}-{:d}-{:d}".format(
+                vdifstr = "{:d}-{:d}-{:d}-{:d}".format(
+                        int(self.stats['DATA_FRAME_LENGTH']-vdiflib.vh.VDIF_HEADER_BYTES), 
                         int(self.stats['CHANNELS_BAND_MHz']*self.stats['NUM_CHANNELS']), 
                         int(self.stats['NUM_CHANNELS']), 
                         int(self.stats['BITS_PER_SAMPLE']), 
-                    ))
+                    )
+                self.vdif_config = vdiflib.vdif_config2str(vdifstr)
+                self.VDIF_settings_combo.setText(vdifstr)
             else:
                 self.alert(title="Error", text="Please input the VDIF settings manually: \n512-16-2\n<band width in MHz>-<num channels>-<bits per sample>")
                 self.VDIF_settings_checkbox.setChecked(True)
+            self.start_button.setEnabled(True)
 
     def display_stats(self, stats):
         i = 0
@@ -189,8 +214,7 @@ class VDIFViewer(QWidget):
         dlg.exec()
 
     def start_background_processing(self):
-        self.start_button.setEnabled(True)
-
+        self.start_button.setEnabled(False)
         # if self.stats.get('CHANNELS_BAND_MHz') is None:
         #     self.alert()
         #     return
@@ -207,6 +231,8 @@ class VDIFViewer(QWidget):
             tmp_data=self.tmp_data,
             parent=self
         )
+        self.vdif_config = vdiflib.vdif_config2str(self.VDIF_settings_combo.text())
+        self.channel_spin.setMaximum(self.vdif_config['channels']-1)
         if self.ready2plot:
             self.prcthread.start()
             self.ready2plot = False
@@ -221,8 +247,15 @@ class VDIFViewer(QWidget):
 
         try:
             data = self.tmp_data[self.current_frame]
-            freq = np.array(data[0][1:], dtype=float)
-            spectrum = np.array(data[1][1:], dtype=complex)
+            print(np.shape(data))
+
+            ichan = self.channel_spin.value()
+            if ichan == -1:
+                freq = np.concatenate(data[0], axis=0)
+                spectrum = np.concatenate(data[1], axis=0)
+            else:
+                freq = data[0][ichan]
+                spectrum = np.array(data[1][ichan], dtype=complex)
 
             peak_max = self.reduce_spin.value()
             amp = np.abs(spectrum)
