@@ -1,4 +1,4 @@
-test/test.vdif
+test/*.vdif
 data/
 
 # Byte-compiled / optimized / DLL files
