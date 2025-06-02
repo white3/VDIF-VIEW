@@ -35,6 +35,7 @@ class VDIFViewer(QWidget):
         self.plotthread = PlotUpdateThread(self.vdifqueue, self)
         self.plotthread.start()
         self.ready2plot = False
+        self.fleshPeriod = 0.5
         self.vdif_config = {
             'bandwidth': 512.0,
             'channels': 16,
@@ -104,6 +105,14 @@ class VDIFViewer(QWidget):
         self.channel_spin.valueChanged.connect(self.plot_current_frame)
         self.channel_spin.setFixedWidth(125)
 
+        self.reflush_rate_label = QLabel("RR:")
+        self.reflush_rate_label.setFixedWidth(50)
+        self.reflush_rate_spin = QDoubleSpinBox()
+        self.reflush_rate_spin.setMinimum(0.1)
+        self.reflush_rate_spin.setValue(self.fleshPeriod)
+        self.reflush_rate_spin.valueChanged.connect(self.update_flesh_period)
+        self.reflush_rate_spin.setFixedWidth(100)
+
         self.reduce_label = QLabel("View Max Amp:")
         self.reduce_label.setFixedWidth(100)
         self.reduce_spin = QDoubleSpinBox()
@@ -127,6 +136,8 @@ class VDIFViewer(QWidget):
         int_layout.addWidget(self.reduce_spin)
         int_layout.addWidget(self.current_channel_label)
         int_layout.addWidget(self.channel_spin)
+        int_layout.addWidget(self.reflush_rate_label)
+        int_layout.addWidget(self.reflush_rate_spin)
         int_layout.setAlignment(Qt.AlignLeft)
         left_layout.addLayout(int_layout)
 
@@ -187,6 +198,9 @@ class VDIFViewer(QWidget):
         # 第1列填满剩余空间
         header.setSectionResizeMode(1, QHeaderView.Stretch)           
     
+    def update_flesh_period(self):
+        self.fleshPeriod = self.reflush_rate_spin.value()
+
     def alert(self, title="Error", text="The VDIF data duration should exceed 1 second!"):
         dlg = QMessageBox(self)
         dlg.setWindowTitle(title)
@@ -228,7 +242,7 @@ class VDIFViewer(QWidget):
         self.tmp_data[0] += data[0]
         self.tmp_data[1] = data[1]
         tmp_time = datetime.now().timestamp()
-        if tmp_time - self.last_plot_time > 0.1:
+        if tmp_time - self.last_plot_time > self.fleshPeriod:
             self.plot_current_frame()
             self.last_plot_time = tmp_time
 
