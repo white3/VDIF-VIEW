@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 #from qt_material import apply_stylesheet
 import qdarktheme
 import queue
+from PyQt5.QtWidgets import QSplitter
 
 class VDIFViewer(QWidget):
     def __init__(self):
@@ -42,6 +43,9 @@ class VDIFViewer(QWidget):
             'bits': 2,
             'threads': 1
         }
+        self.title_suffix = None
+        self.thread_channels = {}   # {thread_id: channel_count}
+        self.thread_ids = []        # sorted thread ids
         self.init_ui()
 
     def closeEvent(self, event):
@@ -53,7 +57,7 @@ class VDIFViewer(QWidget):
 
     def init_ui(self):
         self.setWindowIcon(QIcon('./icon.png'))
-        main_layout = QHBoxLayout()
+        main_layout = QVBoxLayout()
         left_layout = QVBoxLayout()
         right_layout = QVBoxLayout()
         int_layout = QHBoxLayout()
@@ -110,7 +114,7 @@ class VDIFViewer(QWidget):
         self.thread_spin = QSpinBox()
         self.thread_spin.setMinimum(-1)
         self.thread_spin.setValue(0)
-        self.thread_spin.valueChanged.connect(self.plot_current_frame)
+        self.thread_spin.valueChanged.connect(self.on_thread_changed)
         self.thread_spin.setFixedWidth(125)
 
         self.reflush_rate_label = QLabel("RR:")
@@ -159,16 +163,32 @@ class VDIFViewer(QWidget):
 
         self.tableview = QTableView()
         self.tableview.setAlternatingRowColors(True)
-        self.tableview.setFixedWidth(400)
-        self.tableview.setColumnWidth(0, 240)
-        self.tableview.setColumnWidth(1, 160)
 
-        # 关联 QTableView控件和 Model
+        # 设置模型
         self.tableview.setModel(self.model)
-        right_layout.addWidget(self.tableview)
 
-        main_layout.addLayout(left_layout)
-        main_layout.addLayout(right_layout)
+        # 设置列宽按比例填充（60% / 40%）
+        header = self.tableview.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+
+        # 可选：设置比例（用 setStretchLastSection 和 resizeSection）
+        header.setStretchLastSection(False)
+        total_width = self.tableview.viewport().width()
+        header.resizeSection(0, int(total_width * 0.6))
+        header.resizeSection(1, int(total_width * 0.4))
+
+        # 添加到右侧布局（自动填充宽度）
+        right_layout.addWidget(self.tableview)
+        
+        splitter = QSplitter()
+        left_widget = QWidget(); left_widget.setLayout(left_layout)
+        right_widget = QWidget(); right_widget.setLayout(right_layout)
+        splitter.addWidget(left_widget)
+        splitter.addWidget(right_widget)
+
+        # 加入主布局
+        main_layout.addWidget(splitter)
         self.setLayout(main_layout)
         self.start_button.setEnabled(False)
 
@@ -179,8 +199,34 @@ class VDIFViewer(QWidget):
             self.file_label.setText(f"Selected: {path}")
             self.vdif_path = path
             self.stats = vdiflib.analyze_vdif_file(path)
+            if self.stats.get("THREAD_CHANNELS"):
+                threads_ch = self.stats["THREAD_CHANNELS"]
+                chan_counts = list(threads_ch.values())
+                if all(c == chan_counts[0] for c in chan_counts):
+                    # 所有 thread 通道数相同
+                    self.stats["├─ Thread CH"] = chan_counts[0]
+                else:
+                    # 通道数不同，分别列出
+                    for tid, ch in sorted(threads_ch.items()):
+                        self.stats[f"├─ Thread {tid}"] = ch
             self.display_stats(self.stats)
             self.ready2plot = True
+                        # --- multi-thread meta from stats ---
+            self.thread_channels = self.stats.get('THREAD_CHANNELS', {})
+            self.thread_ids = sorted(self.thread_channels.keys())
+
+            # 线程选择范围：[-1, max_tid]；若没有多线程，保持[-1, -1]
+            if self.thread_ids:
+                self.thread_spin.setMinimum(-1)
+                self.thread_spin.setMaximum(max(self.thread_ids))
+            else:
+                self.thread_spin.setMinimum(-1)
+                self.thread_spin.setMaximum(-1)
+
+            # 当选择了具体 thread（见 on_thread_changed），channel 的最大值会被动态重设
+            # 这里先跟随 vdif_config 的 channels 作为兜底
+            self.channel_spin.setMaximum(int(self.vdif_config.get('channels', 1)) - 1)
+
             if self.stats.get('CHANNELS_BAND_MHz'):
                 vdifstr = "{:d}-{:d}-{:d}-{:d}".format(
                         int(self.stats['DATA_FRAME_LENGTH']-vdiflib.vh.VDIF_HEADER_BYTES), 
@@ -201,7 +247,7 @@ class VDIFViewer(QWidget):
             self.model.setItem(i, 0, QStandardItem(str(field_name)))
             self.model.setItem(i, 1, QStandardItem(str(field_value)))
             i += 1
-        
+
         header = self.tableview.horizontalHeader()
         # 第0列自适应内容
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)  
@@ -210,6 +256,65 @@ class VDIFViewer(QWidget):
     
     def update_flesh_period(self):
         self.fleshPeriod = self.reflush_rate_spin.value()
+
+    # ---------- helpers for multi-thread UI ----------
+
+    def _valid_channel_range_for_thread(self, tid: int):
+        """返回指定 thread 的合法 channel 范围 (start=0, end=cnt-1)。不存在则返回 None。"""
+        if tid in self.thread_channels:
+            cnt = int(self.thread_channels[tid])
+            return (0, cnt - 1)
+        return None
+
+    def _overall_thread_bounds(self):
+        """返回 (t_first, t_end)。若无多线程，返回(None, None)。"""
+        if not self.thread_ids:
+            return (None, None)
+        return (self.thread_ids[0], self.thread_ids[-1])
+
+    def _overall_channel_bounds(self, tid: int):
+        """返回某个thread的(0, end)；若tid为None则返回全局最大通道范围(0, max_end)。"""
+        if tid is not None:
+            rng = self._valid_channel_range_for_thread(tid)
+            if rng:
+                return rng
+            return (0, -1)
+        # 全局：取所有thread的最大通道数
+        if not self.thread_channels:
+            return (0, int(self.vdif_config.get('channels', 1)) - 1)
+        max_cnt = max(int(v) for v in self.thread_channels.values())
+        return (0, max_cnt - 1)
+
+    def on_thread_changed(self, tid_val: int):
+        """thread_spin 调整时：动态更新 channel 的范围 & 必要时给出警告"""
+        # 当选择具体 thread 时，重设 channel 的上限为该 thread 的通道数-1
+        if tid_val != -1 and self.thread_channels:
+            rng = self._valid_channel_range_for_thread(tid_val)
+            if rng is None:
+                # 选择了不存在的 thread id，回退到 -1 并警告
+                self.thread_spin.blockSignals(True)
+                self.thread_spin.setValue(-1)
+                self.thread_spin.blockSignals(False)
+                self.alert(title="Warning",
+                           text=f"Thread {tid_val} 不存在于数据中。已切回所有线程（-1）。")
+            else:
+                # 更新 channel 上限
+                _, ch_end = rng
+                self.channel_spin.setMaximum(max(0, ch_end))
+                # 若当前 channel 超出范围，警告并回退到 -1
+                if self.channel_spin.value() > ch_end:
+                    self.channel_spin.setValue(-1)
+                    self.alert(title="Warning",
+                               text=f"Thread {tid_val} 的通道范围为 0..{ch_end}，已将通道切回 -1（全部）。")
+        else:
+            # 选择 “全部线程(-1)” 时，channel 上限设置为全局最大
+            _, ch_end = self._overall_channel_bounds(None)
+            self.channel_spin.setMaximum(max(0, ch_end))
+
+        # 触发重绘与标题更新
+        self.plot_current_frame()
+    
+    # ---------- helpers for multi-thread UI/end ----------
 
     def alert(self, title="Error", text="The VDIF data duration should exceed 1 second!"):
         dlg = QMessageBox(self)
@@ -259,6 +364,46 @@ class VDIFViewer(QWidget):
     def plot_current_frame(self, text=None):
         try:
             data = copy.deepcopy(self.tmp_data)
+
+            # --- multi-thread UI: 取当前选择 ---
+            tid = self.thread_spin.value()
+            chv = self.channel_spin.value()
+
+            # 2) 如果切到某个 thread，则校验 channel 合法性（不存在就弹窗）
+            if tid != -1 and self.thread_channels:
+                rng = self._valid_channel_range_for_thread(tid)
+                if rng is None:
+                    # 不存在的 thread（理论上 on_thread_changed 已兜底，这里再次保护）
+                    self.alert(title="Warning",
+                               text=f"Thread {tid} 不存在于数据中。")
+                    return
+                ch0, ch1 = rng
+                if chv != -1 and not (ch0 <= chv <= ch1):
+                    self.alert(title="Warning",
+                               text=f"Thread {tid} 的通道范围为 0..{ch1}，当前选择 {chv} 非法。")
+                    return
+
+            # 3) 标题文案（仅改变标题，不改变数据选择逻辑；数据仍按你现有通道拼接）
+            self.title_suffix = None
+            if tid != -1 and chv != -1:
+                # thread-{thread_id}:ch-{channel_id}
+                self.title_suffix = f"thread-{tid}:ch-{chv}"
+            elif tid != -1 and chv == -1:
+                # thread-{thread_id}:ch-{ch_first} ==> ch-{ch_end}
+                ch0, ch1 = self._overall_channel_bounds(tid)
+                self.title_suffix = f"thread-{tid}:ch-{ch0} ==> ch-{ch1}"
+            elif tid == -1 and chv == -1:
+                # thread-{t_first}ch-{ch_first} ==>  thread-{t_end}ch-{ch_end}
+                tf, tl = self._overall_thread_bounds()
+                # 若没有多线程信息，用 0..channels-1 填充
+                ch0, ch1 = self._overall_channel_bounds(None)
+                if tf is None or tl is None:
+                    self.title_suffix = f"thread-0ch-{ch0} ==> thread-0ch-{ch1}"
+                else:
+                    # 末尾通道用最后一个 thread 的范围末端
+                    _, last_ch1 = self._overall_channel_bounds(tl)
+                    self.title_suffix = f"thread-{tf}ch-{ch0} ==> thread-{tl}ch-{last_ch1}"
+            # 其他组合（tid == -1 且 chv != -1）未在需求中定义，保持默认标题
 
             ichan = self.channel_spin.value()
             if ichan == -1:
@@ -317,6 +462,13 @@ class VDIFViewer(QWidget):
 
         # 振幅图
         # ax1.plot(freq, np.abs(spectrum), color='tab:blue', label='Amplitude')
+        amp_title = "Amplitude Spectrum"
+        phs_title = "Phase Spectrum"
+        if self.title_suffix:
+            amp_title += f" [{self.title_suffix}]"
+            phs_title += f" [{self.title_suffix}]"
+        self.ax1.set_title(amp_title, fontsize=14, fontweight='bold')
+        self.ax2.set_title(phs_title, fontsize=14, fontweight='bold')
         self.ax1.set_title("Amplitude Spectrum", fontsize=title_fontsize, fontweight='bold')
         self.ax1.grid(True, linestyle='--', alpha=0.7)
         # self.ax1.legend(fontsize=tick_fontsize)

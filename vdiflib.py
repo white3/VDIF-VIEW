@@ -110,6 +110,19 @@ def analyze_vdif_file(filepath):
     seconds = header0.data_frame_number / stats['DATA_FRAME_NUMBER']
     stats['First Frame'] = header0.get_timestamp() + \
         timedelta(seconds=seconds)
+
+    # ======================== 新增线程与通道分析 ========================
+    from collections import defaultdict
+    thread_channels = defaultdict(set)
+    with open(filepath, 'rb') as f:
+        for h, _ in vh.get_VDIFs(f):
+            if h.seconds_from_epoch != header0.seconds_from_epoch:
+                break
+            thread_channels[h.thread_id].add(h.num_channels)
+    
+    stats['THREAD_COUNT'] = len(thread_channels)
+    stats['THREAD_CHANNELS'] = {k: max(v) for k, v in thread_channels.items()}
+    # ===================================================================
     return stats 
 
 def parse_vdif_config(vdifstr='8000-512-16-2'):
