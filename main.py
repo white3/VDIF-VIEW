@@ -15,7 +15,7 @@ from matplotlib.figure import Figure
 import vdiflib
 from datetime import datetime, timezone
 #from qt_material import apply_stylesheet
-import qdarktheme
+#import qdarktheme
 import queue
 
 class VDIFViewer(QWidget):
@@ -121,6 +121,17 @@ class VDIFViewer(QWidget):
         self.reflush_rate_spin.valueChanged.connect(self.update_flesh_period)
         self.reflush_rate_spin.setFixedWidth(100)
 
+        self.center_freq_label = QLabel("Center Freq (MHz):")
+        self.center_freq_label.setFixedWidth(130)
+        self.center_freq_input = QDoubleSpinBox()
+        self.center_freq_input.setMinimum(0)
+        self.center_freq_input.setMaximum(1e9)
+        self.center_freq_input.setDecimals(3)
+        self.center_freq_input.setSingleStep(1.0)
+        self.center_freq_input.setValue(0.0)  # 默认0表示无偏移
+        self.center_freq_input.setFixedWidth(150)
+
+
         self.reduce_label = QLabel("View Max Amp:")
         self.reduce_label.setFixedWidth(100)
         self.reduce_spin = QDoubleSpinBox()
@@ -137,6 +148,9 @@ class VDIFViewer(QWidget):
         file_label_layout.addWidget(self.file_label)
         left_layout.addLayout(file_label_layout)
         
+        int_layout.addWidget(self.center_freq_label)
+        int_layout.addWidget(self.center_freq_input)
+
         int_layout.addWidget(self.start_button)
         int_layout.addWidget(self.FFT_size_label)
         int_layout.addWidget(self.FFT_size_spin)
@@ -238,9 +252,16 @@ class VDIFViewer(QWidget):
         self.last_plot_time = datetime.now().timestamp()
         if self.ready2plot:
             self.freq = self.prcthread.getFreq()
-            self.tmp_data = [
-                np.zeros((self.vdif_config['channels'], self.fftsize//2), dtype=float),
-                np.zeros((self.vdif_config['channels'], self.fftsize//2), dtype=complex)]
+            if self.stats.get('DATA_TYPE') == 'complex':
+                self.tmp_data = [
+                    np.zeros((self.vdif_config['channels'], self.fftsize), dtype=float),     # full spectrum amplitude
+                    np.zeros((self.vdif_config['channels'], self.fftsize), dtype=complex)    # full spectrum phase
+                ]
+            else:  # real
+                self.tmp_data = [
+                    np.zeros((self.vdif_config['channels'], self.fftsize // 2), dtype=float),
+                    np.zeros((self.vdif_config['channels'], self.fftsize // 2), dtype=complex)
+                ]
             self.prcthread.start()
             self.ready2plot = False
 
@@ -262,12 +283,13 @@ class VDIFViewer(QWidget):
 
             ichan = self.channel_spin.value()
             if ichan == -1:
-                freq = np.concatenate(self.freq, axis=0)
+                freq = np.concatenate(self.freq, axis=0) + center_freq
                 amp = np.concatenate(data[0])
                 # amp = vdiflib.power_to_db(data[0])
                 phase = np.concatenate(data[1])
             else:
-                freq = self.freq[ichan]
+                center_freq = self.center_freq_input.value()
+                freq = self.freq[ichan] + center_freq
                 amp = data[0][ichan]
                 # amp = vdiflib.power_to_db(data[0])
                 phase = data[1][ichan]
@@ -373,6 +395,6 @@ if __name__ == '__main__':
     viewer = VDIFViewer()
     # setup stylesheet
     #apply_stylesheet(app, theme='light_blue.xml')
-    qdarktheme.setup_theme()
+    #qdarktheme.setup_theme()
     viewer.show()
     sys.exit(app.exec_())

@@ -93,8 +93,8 @@ def analyze_vdif_file(filepath):
         stats['CHANNELS_BAND_MHz'] = (header.data_frame_number+1) * \
             (header.data_frame_length - vh.VDIF_HEADER_BYTES) * 8.0 \
             / header.bits_per_sample / header.num_channels / 1000000.0 / 2
-        if header.data_type == 'complex':
-            stats['CHANNELS_BAND_MHz'] /= 2
+        # if header.data_type == 'complex':
+        #     stats['CHANNELS_BAND_MHz'] /= 2
         stats['BPS_MHz'] = (header.data_frame_number+1) * \
             (header.data_frame_length - vh.VDIF_HEADER_BYTES) \
              * 8.0 / 1000000.0
@@ -165,11 +165,27 @@ class VDIFProcessThread(threading.Thread):
         nchan = self.proc_params['channels']    
         bandw = self.proc_params['bandwidth']  
         fftsize = self.fftsize 
+        vtype = self.stats.get('DATA_TYPE', 'real')  # 默认为 real
+
         freq = []
-        for ifft in range(nchan):
-            freq.append(np.linspace(bandw/nchan*ifft, 
-                bandw/nchan*(ifft+1), int(fftsize//2)))
+        for ichan in range(nchan):
+            if vtype == 'complex':
+                # 保留全频段
+                freq.append(np.linspace(
+                    bandw/nchan * -0.5,  # 左边界（负频率）
+                    bandw/nchan * 0.5,   # 右边界（正频率）
+                    fftsize,
+                    endpoint=False
+                ))
+            else:
+                # 实数信号 → 只取正频率一半
+                freq.append(np.linspace(
+                    bandw/nchan*ichan,
+                    bandw/nchan*(ichan + 1),
+                    fftsize // 2
+                ))
         return np.array(freq)
+
 
     def run(self):
         print(f"Processing {self.vdif_path} with {self.proc_params}")
@@ -215,9 +231,9 @@ class VDIFProcessThread(threading.Thread):
                     for ifft in range(nfft):
                         for ichan in range(nchan):
                             start = ifft * fftsize
-                            end = start + fftsize
-                            real_part = np.array(vdatas_float[ichan::nchan][start:end])
-                            imag_part = np.array(vdatas_float[1::nchan][start:end])
+                            end = start + fftsize                                                        
+                            real_part = np.array(vdatas_float[ichan*2::nchan*2][start:end])
+                            imag_part = np.array(vdatas_float[ichan*2+1::nchan*2][start:end])
                             vdata_chaned[ifft][ichan] = real_part + 1j * imag_part
                         # FFT, vdata_chaned: [nchan][nfft*fftsize]
                         # print(f"Processing batch {idx+1} ({nframes} frames / {ifft} FFTs / Total {nfft} FFTs) - FFT")
@@ -227,7 +243,8 @@ class VDIFProcessThread(threading.Thread):
                         # 形状 (nchan, fftsize)
                         # print(f"Put {fftsize} FFT data to queue")
                         self.qt_queue.put(
-                            [fft_amp[:,:fftsize//2], fft_phase[:,:fftsize//2]])
+                            [fft_amp, fft_phase]  # 保留完整频谱
+                        )
                 elif vtype == 'real':
                     for ifft in range(nfft):
                         for ichan in range(nchan):
