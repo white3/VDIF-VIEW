@@ -1,4 +1,5 @@
 test/*.vdif
+up_github.bat
 data/
 
 # Byte-compiled / optimized / DLL files
