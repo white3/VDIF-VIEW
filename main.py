@@ -28,6 +28,7 @@ class VDIFViewer(QWidget):
         # data cache for background processing
         self.vdifqueue = queue.Queue()
         self.tmp_data = []
+        self.freq = None
         # data cache for plotting
         self.plotnum = vdiflib.AtomicInt(-1)
         # data cache for processing parameters
@@ -48,11 +49,24 @@ class VDIFViewer(QWidget):
         self.thread_ids = []        # sorted thread ids
         self.init_ui()
 
+    def _stop_processing_thread(self):
+        """Stop current processing thread and wait briefly for exit."""
+        if self.prcthread and self.prcthread.is_alive():
+            self.prcthread.stopProcess()
+            self.prcthread.join(timeout=1.5)
+
+    def _clear_plot_queue(self):
+        """Drain queued FFT frames to avoid stale-file data mixing."""
+        while True:
+            try:
+                self.vdifqueue.get_nowait()
+            except queue.Empty:
+                break
+
     def closeEvent(self, event):
         print("Closing VDIF Viewer")
+        self._stop_processing_thread()
         self.plotthread.stop()
-        if self.prcthread:
-            self.prcthread.stopProcess()
         return super().closeEvent(event)
 
     def init_ui(self):
@@ -210,6 +224,13 @@ class VDIFViewer(QWidget):
         path, _ = QFileDialog.getOpenFileName(self, 
             "Open VDIF File", "", "VDIF Files (*.vdif);;All Files (*)")
         if path:
+            # 切换文件前先停旧处理并清空旧数据，避免新旧文件数据混流
+            self._stop_processing_thread()
+            self._clear_plot_queue()
+            self.tmp_data = []
+            self.ready2plot = False
+            self.title_suffix = None
+
             self.file_label.setText(f"Selected: {path}")
             self.vdif_path = path
             self.stats = vdiflib.analyze_vdif_file(path)
@@ -240,6 +261,12 @@ class VDIFViewer(QWidget):
             # 当选择了具体 thread（见 on_thread_changed），channel 的最大值会被动态重设
             # 这里先跟随 vdif_config 的 channels 作为兜底
             self.channel_spin.setMaximum(int(self.vdif_config.get('channels', 1)) - 1)
+            self.channel_spin.blockSignals(True)
+            self.thread_spin.blockSignals(True)
+            self.channel_spin.setValue(0)
+            self.thread_spin.setValue(-1)
+            self.channel_spin.blockSignals(False)
+            self.thread_spin.blockSignals(False)
 
             if self.stats.get('CHANNELS_BAND_MHz'):
                 vdifstr = "{:d}-{:d}-{:d}-{:d}".format(
@@ -340,8 +367,9 @@ class VDIFViewer(QWidget):
 
     def start_background_processing(self):
         self.start_button.setEnabled(False)
-        if self.prcthread:
-            self.prcthread.stats["running"] = False
+        # 重启处理前先确保旧线程退出并清空旧队列数据
+        self._stop_processing_thread()
+        self._clear_plot_queue()
         self.plotnum = vdiflib.AtomicInt(-1)
         self.fftsize = self.FFT_size_spin.value()
         self.prcthread = vdiflib.VDIFProcessThread(
@@ -375,6 +403,11 @@ class VDIFViewer(QWidget):
         self.display_stats(self.stats)
 
     def update_data(self, data):
+        if not self.tmp_data:
+            return
+        # 避免切文件竞态导致旧shape数据写入新缓存
+        if data[0].shape != self.tmp_data[0].shape or data[1].shape != self.tmp_data[1].shape:
+            return
         self.tmp_data[0] += data[0]
         self.tmp_data[1] = data[1]
         tmp_time = datetime.now().timestamp()
@@ -384,7 +417,10 @@ class VDIFViewer(QWidget):
 
     def plot_current_frame(self, text=None):
         try:
+            if self.freq is None or len(self.tmp_data) < 2:
+                return
             data = copy.deepcopy(self.tmp_data)
+            center_freq = self.center_freq_input.value()
 
             # --- multi-thread UI: 取当前选择 ---
             tid = self.thread_spin.value()
@@ -433,7 +469,6 @@ class VDIFViewer(QWidget):
                 # amp = vdiflib.power_to_db(data[0])
                 phase = np.concatenate(data[1])
             else:
-                center_freq = self.center_freq_input.value()
                 freq = self.freq[ichan] + center_freq
                 amp = data[0][ichan]
                 # amp = vdiflib.power_to_db(data[0])
