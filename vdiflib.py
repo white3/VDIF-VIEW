@@ -93,8 +93,6 @@ def analyze_vdif_file(filepath):
         stats['CHANNELS_BAND_MHz'] = (header.data_frame_number+1) * \
             (header.data_frame_length - vh.VDIF_HEADER_BYTES) * 8.0 \
             / header.bits_per_sample / header.num_channels / 1000000.0 / 2
-        if header.data_type == 'complex':
-            stats['CHANNELS_BAND_MHz'] /= 2
         stats['BPS_MHz'] = (header.data_frame_number+1) * \
             (header.data_frame_length - vh.VDIF_HEADER_BYTES) \
              * 8.0 / 1000000.0
